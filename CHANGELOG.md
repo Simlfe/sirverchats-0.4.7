@@ -1,5 +1,14 @@
 # Sirver Application Changelog
 
+## [3.9-voice-join-critical-path] - 2026-09-17
+### Single-capture microphone join, direct production token routing, and cancellable room switching
+- Production web/native clients now call the configured `chat.sirverdata.top` token endpoint directly; the same-origin `/livekit/token` proxy is restricted to the local Vite development server that actually implements it.
+- Explicit Join/Accept actions acquire one microphone track while the LiveKit module and session-scoped token prepare concurrently, then publish that same track instead of opening a second capture stream.
+- Removed the delayed 250 ms microphone re-enable pass and duplicate speaking-detector initialization. A failed microphone publication now produces an actionable failed state instead of reporting the room as connected.
+- Same-room joins coalesce without aborting themselves. Leave and A-to-B room switches invalidate the previous generation immediately so stale negotiation cannot reconnect or clear the newer room.
+- Added sanitized phase timing for microphone readiness, code/token readiness, signaling/ICE connection and final media readiness.
+- Added regression coverage for production/development token routing, single microphone acquisition, same-room coalescing and immediate A-to-B cancellation.
+
 ## [3.9-disconnect-sound-deduplication] - 2026-09-16
 ### Call Disconnect Audio Deduplication
 - **Eliminated Duplicate `playLeaveSound()` Invocations:** Removed redundant call to `playLeaveSound()` in `handleLeaveVoice` inside `src/App.tsx`, letting the centralized `leaveRoomOrCall` provider method in `src/context/MediaContext.tsx` authoritatively manage the audio cue.

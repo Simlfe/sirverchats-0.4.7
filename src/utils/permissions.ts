@@ -4,6 +4,10 @@ export interface PermissionResult {
   error?: string;
 }
 
+export interface MicrophoneAcquisitionResult extends PermissionResult {
+  track?: MediaStreamTrack;
+}
+
 type PermissionChangeCallback = (type: 'microphone' | 'camera', state: 'granted' | 'denied' | 'prompt') => void;
 const permissionListeners = new Set<PermissionChangeCallback>();
 
@@ -87,6 +91,85 @@ export async function checkAndRequestMicrophonePermission(): Promise<PermissionR
       err?.message?.toLowerCase().includes('denied') ||
       err?.message?.toLowerCase().includes('permission');
 
+    return {
+      granted: false,
+      state: isDenied ? 'denied' : 'prompt',
+      error: isDenied
+        ? 'Voice chat requires microphone access to transmit your audio. Microphone permission was denied in your browser or OS settings. Please grant microphone access and try again.'
+        : err?.message || 'Failed to access microphone.',
+    };
+  }
+}
+
+/**
+ * Acquires the microphone exactly once for an explicit Join/Accept action.
+ * The caller owns the returned track until the media provider adopts it and
+ * must stop it if token/module preparation or the join itself fails.
+ */
+export async function acquireMicrophoneForJoin(): Promise<MicrophoneAcquisitionResult> {
+  startPermissionMonitoring();
+
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+    return {
+      granted: false,
+      state: 'denied',
+      error: 'Audio capture device interface is unavailable in this browser environment.',
+    };
+  }
+
+  const selectedMicId = typeof window !== 'undefined' ? window.localStorage?.getItem('selected_audio_input') : null;
+  const audio: MediaTrackConstraints & Record<string, unknown> = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    channelCount: { ideal: 1 },
+    sampleRate: { ideal: 48000 },
+    googEchoCancellation: true,
+    googAutoGainControl: true,
+    googNoiseSuppression: true,
+    googHighpassFilter: true,
+    googTypingNoiseDetection: false,
+  };
+  if (selectedMicId && selectedMicId !== 'default') {
+    audio.deviceId = { exact: selectedMicId };
+  }
+
+  try {
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: audio as MediaTrackConstraints });
+    } catch (initialErr: any) {
+      if (initialErr?.name === 'NotAllowedError' || initialErr?.name === 'PermissionDeniedError') {
+        throw initialErr;
+      }
+      // A removed/stale selected device must not block joining with the OS
+      // default input.
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+    }
+
+    const track = stream.getAudioTracks()[0];
+    if (!track) {
+      stream.getTracks().forEach((candidate) => candidate.stop());
+      return {
+        granted: false,
+        state: 'prompt',
+        error: 'No microphone track was returned by the selected input device.',
+      };
+    }
+    track.enabled = true;
+    return { granted: true, state: 'granted', track };
+  } catch (err: any) {
+    const isDenied =
+      err?.name === 'NotAllowedError' ||
+      err?.name === 'PermissionDeniedError' ||
+      err?.message?.toLowerCase().includes('denied') ||
+      err?.message?.toLowerCase().includes('permission');
     return {
       granted: false,
       state: isDenied ? 'denied' : 'prompt',

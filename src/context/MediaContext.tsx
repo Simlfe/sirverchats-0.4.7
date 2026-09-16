@@ -16,7 +16,11 @@ import realtimeMediaProvider from '../media/RealtimeMediaProvider';
 import callSignalingService from '../services/callSignaling';
 import { playJoinSound, playLeaveSound, setRingtoneMuted, getIsRingtoneMuted, stopAllRingtones, unlockAudioContext } from '../lib/sounds';
 import { getServerMemberAvatarUrl, getServerMemberDisplayName, pbService, parseChannelOptions, mergeUserRecord } from '../pocketbase';
-import { checkAndRequestMicrophonePermission, checkAndRequestCameraPermission, checkAndRequestScreenSharePermission } from '../utils/permissions';
+import {
+  acquireMicrophoneForJoin,
+  checkAndRequestCameraPermission,
+  checkAndRequestScreenSharePermission,
+} from '../utils/permissions';
 import { voiceSessionRecovery } from '../services/voiceSessionRecovery';
 import { recordCallLog } from '../services/callLogService';
 
@@ -64,6 +68,52 @@ interface MediaContextType {
 }
 
 const MediaContext = createContext<MediaContextType | null>(null);
+
+const createVoiceSessionId = () => `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+async function prepareRoomJoin(config: RoomConfig): Promise<RoomConfig> {
+  const joinStartedAtMs = config.joinStartedAtMs ?? (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const preparedConfig = {
+    ...config,
+    sessionId: config.sessionId || createVoiceSessionId(),
+    joinStartedAtMs,
+  };
+  const microphoneTask = acquireMicrophoneForJoin().then((result) => {
+    console.info('[VOICE_JOIN_TIMING]', {
+      phase: result.granted ? 'microphone_ready' : 'microphone_failed',
+      durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - joinStartedAtMs),
+    });
+    return result;
+  });
+  const preflightTask = realtimeMediaProvider.preflightRoom(preparedConfig).then(() => {
+    console.info('[VOICE_JOIN_TIMING]', {
+      phase: 'code_and_token_ready',
+      durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - joinStartedAtMs),
+    });
+  });
+  const [microphoneResult, preflightResult] = await Promise.allSettled([
+    microphoneTask,
+    preflightTask,
+  ]);
+
+  const microphone = microphoneResult.status === 'fulfilled' ? microphoneResult.value : null;
+  if (preflightResult.status === 'rejected') {
+    microphone?.track?.stop();
+    throw preflightResult.reason;
+  }
+  if (!microphone || !microphone.granted || !microphone.track) {
+    const error = new Error(
+      microphone?.error ||
+        (microphoneResult.status === 'rejected'
+          ? String(microphoneResult.reason)
+          : 'Microphone permission was not granted.')
+    );
+    (error as any).code = 'PERMISSION_DENIED';
+    throw error;
+  }
+
+  return { ...preparedConfig, initialMicrophoneTrack: microphone.track };
+}
 
 export const MediaProvider: React.FC<{
   children: React.ReactNode;
@@ -386,11 +436,16 @@ export const MediaProvider: React.FC<{
               callId: event.roomType === 'voice_room' ? undefined : event.callId,
               channelId: event.channelId || event.conversationId,
               serverId: event.serverId,
+              sessionId: activeOutgoing?.sessionId || createVoiceSessionId(),
             };
 
-            setActiveRoom(config);
+            let preparedConfig: RoomConfig | null = null;
+            let mediaConnected = false;
             try {
-              await realtimeMediaProvider.joinRoom(config);
+              preparedConfig = await prepareRoomJoin(config);
+              setActiveRoom(preparedConfig);
+              await realtimeMediaProvider.joinRoom(preparedConfig);
+              mediaConnected = true;
               if (targetUser) {
                 const targetAvatarUrl =
                   getServerMemberAvatarUrl(null, targetUser, undefined) ||
@@ -422,6 +477,7 @@ export const MediaProvider: React.FC<{
               playJoinSound();
               startDurationTimer();
             } catch (joinErr) {
+              if (!mediaConnected) preparedConfig?.initialMicrophoneTrack?.stop();
               console.warn('[MediaContext] Join room error upon call accept:', joinErr);
               // The callee must not remain in an accepted state when the
               // caller cannot establish media. Tear down the local session
@@ -491,22 +547,10 @@ export const MediaProvider: React.FC<{
       }
       joiningRoomIdRef.current = channel.id;
       setConnectionState('connecting');
+      let preparedConfig: RoomConfig | null = null;
+      let mediaConnected = false;
       try {
         setError(null);
-
-        // Verify microphone runtime permission before joining
-        const micPerm = await checkAndRequestMicrophonePermission();
-        if (!micPerm.granted) {
-          setError({
-            code: 'PERMISSION_DENIED',
-            message: micPerm.error || 'Microphone permission was not granted.',
-          });
-          setConnectionState('disconnected');
-          voiceSessionRecovery.clearSession();
-          voiceRecoveryAttemptedRef.current = channel.id;
-          joiningRoomIdRef.current = null;
-          return;
-        }
 
         // Check channel max user limit
         const opts = parseChannelOptions(channel);
@@ -542,10 +586,15 @@ export const MediaProvider: React.FC<{
           initialMode: mode,
           channelId: channel.id,
           serverId: channel.server,
+          sessionId: createVoiceSessionId(),
         };
 
-        setActiveRoom(config);
-        const parts = await realtimeMediaProvider.joinRoom(config);
+        // Microphone acquisition, lazy LiveKit loading and token acquisition
+        // begin together after the explicit Join click.
+        preparedConfig = await prepareRoomJoin(config);
+        setActiveRoom(preparedConfig);
+        const parts = await realtimeMediaProvider.joinRoom(preparedConfig);
+        mediaConnected = true;
         setParticipants(parts);
 
         // Save session locally for 2-minute recovery window
@@ -565,6 +614,7 @@ export const MediaProvider: React.FC<{
         playJoinSound();
         startDurationTimer();
       } catch (err: any) {
+        if (!mediaConnected) preparedConfig?.initialMicrophoneTrack?.stop();
         const isCancelled =
           err?.name === 'AbortError' ||
           err?.message?.includes('cancelled') ||
@@ -591,7 +641,7 @@ export const MediaProvider: React.FC<{
         setParticipants([]);
         setConnectionState('disconnected');
         setError({
-          code: 'SFU_UNAVAILABLE',
+          code: err?.code === 'PERMISSION_DENIED' ? 'PERMISSION_DENIED' : 'SFU_UNAVAILABLE',
           message: err?.message || 'Failed to connect to voice server',
         });
       } finally {
@@ -630,6 +680,7 @@ export const MediaProvider: React.FC<{
         setError(null);
 
         const callId = `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const sessionId = createVoiceSessionId();
         const callType = mode === 'video' ? 'video' : 'voice';
         const roomName = targetUser.display_name || targetUser.username || 'Voice Call';
 
@@ -645,6 +696,7 @@ export const MediaProvider: React.FC<{
           initialMode: mode,
           callId,
           channelId: dmChannel.id,
+          sessionId,
         });
 
         if (activeRoom && activeRoom.roomId !== dmChannel.id) {
@@ -685,6 +737,7 @@ export const MediaProvider: React.FC<{
           roomName,
           maxParticipants: 2,
           channelId: dmChannel.id,
+          sessionId,
           state: 'ringing',
           timestamp: Date.now(),
         };
@@ -759,6 +812,8 @@ export const MediaProvider: React.FC<{
     const activeUser = currentUserRef.current || currentUser || pbService.getCurrentUser();
     const event = incomingCallRef.current || incomingCall;
     if (!event || !activeUser) return;
+    let preparedConfig: RoomConfig | null = null;
+    let mediaConnected = false;
 
     try {
       setError(null);
@@ -771,9 +826,6 @@ export const MediaProvider: React.FC<{
         callType: event.callType || 'voice',
       };
 
-      callSignalingService.acceptCall(event.callId, event);
-      setIncomingCall(null);
-
       const config: RoomConfig = {
         roomId: event.conversationId,
         roomName: event.roomName || event.callerName,
@@ -784,10 +836,15 @@ export const MediaProvider: React.FC<{
         callId: event.roomType === 'voice_room' ? undefined : event.callId,
         channelId: event.channelId || event.conversationId,
         serverId: event.serverId,
+        sessionId: createVoiceSessionId(),
       };
 
-      setActiveRoom(config);
-      await realtimeMediaProvider.joinRoom(config);
+      preparedConfig = await prepareRoomJoin(config);
+      callSignalingService.acceptCall(event.callId, event);
+      setIncomingCall(null);
+      setActiveRoom(preparedConfig);
+      await realtimeMediaProvider.joinRoom(preparedConfig);
+      mediaConnected = true;
 
       if (event.callerUser) {
         const callerAvatarUrl =
@@ -821,6 +878,7 @@ export const MediaProvider: React.FC<{
       playJoinSound();
       startDurationTimer();
     } catch (err: any) {
+      if (!mediaConnected) preparedConfig?.initialMicrophoneTrack?.stop();
       const isCancelled =
         err?.name === 'AbortError' ||
         err?.message?.includes('cancelled') ||
@@ -841,7 +899,7 @@ export const MediaProvider: React.FC<{
       setParticipants([]);
       setConnectionState('disconnected');
       setError({
-        code: 'SFU_UNAVAILABLE',
+        code: err?.code === 'PERMISSION_DENIED' ? 'PERMISSION_DENIED' : 'SFU_UNAVAILABLE',
         message: err?.message || 'Failed to connect to the LiveKit media server',
       });
       callSignalingService.endCall(event.callId);

@@ -30,7 +30,6 @@ import useRealtimeMedia from '../context/MediaContext';
 import ParticipantTile from './ParticipantTile';
 import VideoPlayer from './video/VideoPlayer';
 import AudioMixerModal from './AudioMixerModal';
-import { checkAndRequestMicrophonePermission, checkAndRequestCameraPermission } from '../utils/permissions';
 import { pbService } from '../pocketbase';
 import Avatar from './Avatar';
 import voicePresenceStore, { VoiceParticipantInfo } from '../services/voicePresenceStore';
@@ -124,11 +123,10 @@ function VoicePanel({
 
   const handleRetryPermissions = async () => {
     clearError();
-    const micRes = await checkAndRequestMicrophonePermission();
-    const camRes = await checkAndRequestCameraPermission();
-    if (micRes.granted) {
-      handleJoin();
-    }
+    // Join owns the permission request and adopts the resulting track. A
+    // separate probe here opened and stopped one stream immediately before
+    // Join opened another.
+    handleJoin();
   };
   
   // Voice Text Chat state

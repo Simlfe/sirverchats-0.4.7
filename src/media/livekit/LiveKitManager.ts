@@ -90,6 +90,7 @@ export class LiveKitManager {
   private isDeafened: boolean = false;
   private currentFacingMode: 'user' | 'environment' = 'user';
   private isJoiningPromise: Promise<void> | null = null;
+  private joiningRoomId: string | null = null;
   private isExplicitlyJoined: boolean = false;
   private wasConnected: boolean = false;
   private reconnectAttempts: number = 0;
@@ -245,31 +246,22 @@ export class LiveKitManager {
   }
 
   /**
-   * Resolves token endpoints in priority order: browser sessions on third-party
-   * origins prioritize the same-origin `/livekit/token` proxy to avoid CORS blocks,
-   * while native apps and direct chat hosts query the direct gateway.
+   * Resolves token endpoints in priority order. Production and native clients
+   * go directly to the configured gateway. Only the local Vite development
+   * server owns a working same-origin `/livekit/token` proxy.
    */
   public resolveTokenEndpoints(primaryEndpoint: string = this.tokenEndpoint || ENDPOINTS.LIVEKIT_TOKEN_ENDPOINT): string[] {
     const endpointsToTry: string[] = [];
     const isBrowser = typeof window !== 'undefined' && typeof window.location !== 'undefined' && Boolean(window.location.protocol?.startsWith('http'));
-    const isDirectChatHost = isBrowser && Boolean(window.location.hostname?.endsWith('chat.sirverdata.top'));
+    const isLocalDevelopment =
+      isBrowser &&
+      (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-    if (isBrowser && !isDirectChatHost) {
-      // In browser web sessions outside the chat host (Cloud Run, preview, dev server, custom domains),
-      // always prioritize the same-origin proxy `/livekit/token` to prevent CORS
-      // preflight blocks ('Failed to fetch') from third-party origins, falling back
-      // to the direct gateway endpoint.
+    if (isLocalDevelopment) {
       endpointsToTry.push('/livekit/token');
-      if (primaryEndpoint && !endpointsToTry.includes(primaryEndpoint)) {
-        endpointsToTry.push(primaryEndpoint);
-      }
-    } else {
-      if (primaryEndpoint) {
-        endpointsToTry.push(primaryEndpoint);
-      }
-      if (isBrowser && !endpointsToTry.includes('/livekit/token')) {
-        endpointsToTry.push('/livekit/token');
-      }
+    }
+    if (primaryEndpoint && !endpointsToTry.includes(primaryEndpoint)) {
+      endpointsToTry.push(primaryEndpoint);
     }
     return endpointsToTry;
   }
@@ -426,7 +418,21 @@ export class LiveKitManager {
       this.reconnectTimer = null;
     }
 
-    // Cancel any previous pending join attempt
+    if (this.isJoiningPromise) {
+      if (this.joiningRoomId === roomConfig.roomId) {
+        console.log('[LiveKitManager] Join already in progress for room:', roomConfig.roomId);
+        return this.isJoiningPromise;
+      }
+      this.joinAbortController?.abort();
+      try {
+        await this.isJoiningPromise;
+      } catch (e) {
+        // Ignored previous join error
+      }
+    }
+
+    // A different-room join owns a new cancellation scope. The same-room case
+    // returned the shared promise above without aborting its own work.
     if (this.joinAbortController) {
       this.joinAbortController.abort();
       this.joinAbortController = null;
@@ -434,18 +440,6 @@ export class LiveKitManager {
     const abortController = new AbortController();
     this.joinAbortController = abortController;
     const { signal } = abortController;
-
-    if (this.isJoiningPromise) {
-      if (this.currentRoomConfig?.roomId === roomConfig.roomId) {
-        console.log('[LiveKitManager] Join already in progress for room:', roomConfig.roomId);
-        return this.isJoiningPromise;
-      }
-      try {
-        await this.isJoiningPromise;
-      } catch (e) {
-        // Ignored previous join error
-      }
-    }
 
     if (signal.aborted) {
       throw new DOMException('Aborted', 'AbortError');
@@ -570,6 +564,15 @@ export class LiveKitManager {
           throw new DOMException('Aborted', 'AbortError');
         }
         console.log(`[LiveKitManager] LiveKit connection success to room "${this.room.name}" as "${identity}"`);
+        if (roomConfig.joinStartedAtMs !== undefined) {
+          console.info('[VOICE_JOIN_TIMING]', {
+            phase: 'signaling_and_ice_connected',
+            durationMs: Math.round(
+              (typeof performance !== 'undefined' ? performance.now() : Date.now()) - roomConfig.joinStartedAtMs
+            ),
+            iceState: this.getIceState(),
+          });
+        }
         this.wasConnected = true;
         this.reconnectAttempts = 0;
         this.setConnectionState('connected');
@@ -657,11 +660,13 @@ export class LiveKitManager {
     })();
 
     this.isJoiningPromise = joinTask;
+    this.joiningRoomId = roomConfig.roomId;
     try {
       await joinTask;
     } finally {
       if (this.isJoiningPromise === joinTask) {
         this.isJoiningPromise = null;
+        this.joiningRoomId = null;
       }
       if (this.joinAbortController === abortController) {
         this.joinAbortController = null;
@@ -684,6 +689,7 @@ export class LiveKitManager {
       this.joinAbortController = null;
     }
     this.isJoiningPromise = null;
+    this.joiningRoomId = null;
 
     this.isExplicitlyJoined = false;
     this.wasConnected = false;
@@ -937,10 +943,14 @@ export class LiveKitManager {
 
   public async publishAudioTrack(track: MediaStreamTrack): Promise<void> {
     if (!this.room || !this.room.localParticipant) return;
-    try {
-      await this.room.localParticipant.publishTrack(track, { name: 'microphone' });
-    } catch (err) {
-      console.warn('[LiveKitManager] Failed to publish audio track:', err);
+    const publication = await this.room.localParticipant.publishTrack(track, {
+      name: 'microphone',
+      source: Track.Source.Microphone,
+      dtx: true,
+      red: true,
+    });
+    if (publication.track && publication.track instanceof LocalAudioTrack) {
+      this.cachedAudioTrack = publication.track;
     }
   }
 

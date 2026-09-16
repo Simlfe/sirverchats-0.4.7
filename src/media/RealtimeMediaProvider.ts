@@ -83,6 +83,7 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
   // panel at once. Share one promise so neither caller reports a connection
   // before LiveKit has actually finished negotiating.
   private joinInFlight: { roomId: string; promise: Promise<MediaParticipant[]> } | null = null;
+  private joinGeneration = 0;
 
   // Local per-user volume map (userId -> volume 0..100)
   private participantVolumes: Map<string, number> = new Map();
@@ -316,7 +317,14 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
         break;
       case 'connection_state_changed':
         if (event.connectionState) {
-          this.setConnectionState(event.connectionState);
+          // LiveKit signaling can be connected before the local microphone is
+          // published. Keep the UI in a negotiating state until joinRoomInternal
+          // confirms media readiness.
+          this.setConnectionState(
+            event.connectionState === 'connected' && this.joinInFlight
+              ? 'connecting'
+              : event.connectionState
+          );
         }
         break;
       case 'error':
@@ -366,12 +374,13 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
       if (inFlight.roomId === config.roomId) {
         return inFlight.promise;
       }
-      // Wait for a previous room switch to settle before tearing down its
-      // LiveKit session.
-      await inFlight.promise.catch(() => {});
+      // Cancel a superseded room immediately. Waiting for its token/ICE timeout
+      // made A -> B switches inherit the full delay of A.
+      await this.leaveRoom();
     }
 
-    const operation = this.joinRoomInternal(config);
+    const generation = ++this.joinGeneration;
+    const operation = this.joinRoomInternal(config, generation);
     this.joinInFlight = { roomId: config.roomId, promise: operation };
     try {
       return await operation;
@@ -382,7 +391,13 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
     }
   }
 
-  private async joinRoomInternal(config: RoomConfig): Promise<MediaParticipant[]> {
+  private assertCurrentJoin(generation: number, roomId: string): void {
+    if (generation !== this.joinGeneration || (this.activeRoom && this.activeRoom.roomId !== roomId)) {
+      throw new DOMException('Voice join was superseded by Leave or another room', 'AbortError');
+    }
+  }
+
+  private async joinRoomInternal(config: RoomConfig, generation: number): Promise<MediaParticipant[]> {
     // 1. Prevent duplicate room connections or concurrent join attempts
     if (this.activeRoom && this.activeRoom.roomId === config.roomId && this.connectionState === 'connected') {
       return this.getParticipants();
@@ -398,7 +413,10 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
     let adapter: SFUProviderAdapter;
     try {
       adapter = await this.ensureSfuAdapter();
+      this.assertCurrentJoin(generation, config.roomId);
     } catch (err: any) {
+      config.initialMicrophoneTrack?.stop();
+      if (err?.name === 'AbortError') throw err;
       const mediaErr: MediaError = {
         code: 'SFU_UNAVAILABLE',
         message: err?.message || 'Failed to load the LiveKit media client',
@@ -432,6 +450,13 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
     this.activeRoom = roomConfigWithSession;
     this.activeSessionId = sessionId;
     this.setConnectionState('joining');
+
+    if (config.initialMicrophoneTrack?.readyState === 'live') {
+      this.localAudioStream?.getTracks().forEach((track) => {
+        if (track !== config.initialMicrophoneTrack) track.stop();
+      });
+      this.localAudioStream = new MediaStream([config.initialMicrophoneTrack]);
+    }
 
     // Resolve server member or global user avatar & display name
     const member = config.serverId ? pbService.getCachedServerMember(config.serverId, config.user.id) : null;
@@ -476,6 +501,7 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
         // evicted the previous connection as DUPLICATE_IDENTITY and the
         // recovery timer kept reconnecting both clients.
         await adapter.joinSession(roomConfigWithSession);
+        this.assertCurrentJoin(generation, config.roomId);
         const adapterState = adapter.getConnectionState();
         if (adapterState !== 'connected') {
           throw new Error(`Media server did not reach a connected state (${adapterState})`);
@@ -483,9 +509,15 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
       } catch (err: any) {
         console.error('[SFU_SUBSYSTEM] SFU session join failed:', err?.message || err);
         await adapter.leaveSession().catch(() => {});
+        config.initialMicrophoneTrack?.stop();
+        this.localAudioStream = null;
         this.participants.delete(config.user.id);
         this.activeRoom = null;
         this.activeSessionId = null;
+        if (err?.name === 'AbortError' || generation !== this.joinGeneration) {
+          this.setConnectionState('disconnected');
+          throw new DOMException('Voice join was cancelled', 'AbortError');
+        }
         const mediaErr: MediaError = {
           code: 'SFU_UNAVAILABLE',
           message: err?.message || 'Failed to connect to the LiveKit media server',
@@ -499,7 +531,18 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
 
     // 2. Auto-start microphone for immediate audio without manual toggle unless explicitly muted
     if (!this.isMuted) {
-      await this.enableMicrophone().catch((e) => console.warn('Microphone auto-start notice:', e));
+      const microphoneTrack = await this.enableMicrophone();
+      this.assertCurrentJoin(generation, config.roomId);
+      if (!microphoneTrack) {
+        await adapter.leaveSession().catch(() => {});
+        config.initialMicrophoneTrack?.stop();
+        this.localAudioStream = null;
+        this.participants.delete(config.user.id);
+        this.activeRoom = null;
+        this.activeSessionId = null;
+        this.setConnectionState('failed');
+        throw new Error('Microphone could not be acquired or published. Check the selected input and try again.');
+      }
     }
 
     // 3. Initialize additional local media according to initial mode
@@ -509,38 +552,27 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
       await this.startScreenShare().catch((e) => console.warn('Screen share auto-start notice:', e));
     }
 
-    // 4. Start local microphone audio analysis for speaking detection
-    await this.setupSpeakingDetector().catch(() => {});
-
-    // 5. Automatic join microphone sync kick-start script to guarantee live audio stream without manual mute/unmute
-    setTimeout(async () => {
-      if (!this.isMuted && this.sfuAdapter) {
-        console.log('[VOICE_SUBSYSTEM] Executing automatic join microphone sync script...');
-        try {
-          if ('setMicrophoneEnabled' in this.sfuAdapter) {
-            await (this.sfuAdapter as any).setMicrophoneEnabled(true);
-          }
-          if (this.localAudioStream) {
-            this.localAudioStream.getAudioTracks().forEach((t) => {
-              t.enabled = true;
-            });
-          }
-        } catch (syncErr) {
-          console.warn('[VOICE_SUBSYSTEM] Auto join mic sync script warning:', syncErr);
-        }
-      }
-    }, 250);
-
+    this.assertCurrentJoin(generation, config.roomId);
     this.setConnectionState('connected');
+    this.updateSelfParticipant({ connectionState: 'connected' });
+    if (config.joinStartedAtMs !== undefined) {
+      console.info('[VOICE_JOIN_TIMING]', {
+        phase: 'media_ready',
+        durationMs: Math.round(
+          (typeof performance !== 'undefined' ? performance.now() : Date.now()) - config.joinStartedAtMs
+        ),
+      });
+    }
     this.notifyParticipantsChanged();
     return this.getParticipants();
   }
 
   public async leaveRoom(): Promise<void> {
+    this.joinGeneration += 1;
+    this.joinInFlight = null;
     if (!this.activeRoom && (this.connectionState === 'idle' || this.connectionState === 'disconnected')) return;
 
     this.setConnectionState('leaving');
-    this.joinInFlight = null;
 
     if (this.activeRoom) {
       const selfId = this.activeRoom.user.id;
@@ -590,6 +622,22 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
       this.updateSelfParticipant({ isMuted: false });
 
       if (this.sfuAdapter && 'setMicrophoneEnabled' in this.sfuAdapter) {
+        const existingSfuTrack = 'getLocalAudioTrack' in this.sfuAdapter
+          ? (this.sfuAdapter as any).getLocalAudioTrack() as MediaStreamTrack | null
+          : null;
+        const preparedTrack = this.localAudioStream?.getAudioTracks().find((track) => track.readyState === 'live') || null;
+
+        if (!existingSfuTrack && preparedTrack) {
+          // Publish the track acquired by the explicit Join/Accept action.
+          // Calling setMicrophoneEnabled first would ask the OS for a second
+          // stream and discard the already-authorized capture.
+          await this.sfuAdapter.publishAudioTrack(preparedTrack);
+          await this.setupSpeakingDetector();
+          return ('getLocalAudioTrack' in this.sfuAdapter
+            ? (this.sfuAdapter as any).getLocalAudioTrack()
+            : null) || preparedTrack;
+        }
+
         const success = await (this.sfuAdapter as any).setMicrophoneEnabled(true);
         if (success) {
           await this.setupSpeakingDetector();

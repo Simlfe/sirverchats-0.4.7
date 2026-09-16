@@ -64,6 +64,10 @@ export interface RoomConfig {
   channelId?: string;
   serverId?: string;
   sessionId?: string;
+  joinStartedAtMs?: number;
+  /** A track acquired by the explicit Join/Accept action. It is published by
+   * the media provider so permission probing never opens a second microphone. */
+  initialMicrophoneTrack?: MediaStreamTrack;
 }
 
 export interface IncomingCallEvent {
@@ -79,6 +83,7 @@ export interface IncomingCallEvent {
   roomType?: MediaCommunicationType;
   roomName?: string;
   maxParticipants?: number;
+  sessionId?: string;
   channelId?: string;
   serverId?: string;
   state: CallSignalingState;
