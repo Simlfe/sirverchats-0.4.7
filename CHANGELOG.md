@@ -8,6 +8,7 @@
 - Same-room joins coalesce without aborting themselves. Leave and A-to-B room switches invalidate the previous generation immediately so stale negotiation cannot reconnect or clear the newer room.
 - Added sanitized phase timing for microphone readiness, code/token readiness, signaling/ICE connection and final media readiness.
 - Added regression coverage for production/development token routing, single microphone acquisition, same-room coalescing and immediate A-to-B cancellation.
+- Regenerated the npm lock from `package.json`, restoring reproducible `npm ci` installs (including PocketBase 0.21.5 and Windows Rollup optional binaries) so CI validates the same dependency graph as the release build.
 
 ## [3.9-disconnect-sound-deduplication] - 2026-09-16
 ### Call Disconnect Audio Deduplication
