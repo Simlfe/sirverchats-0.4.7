@@ -1,0 +1,4 @@
+{
+  "initialJsGzipBytes": 470000,
+  "description": "Measured from the first native performance-remediation build; CI permits a 10% regression, capped by the explicit 520 KiB guard."
+}

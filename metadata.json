@@ -1,0 +1,11 @@
+{
+  "name": "Sirverchats-0.4.7",
+  "description": "Imported from GitHub: Simlfe/SirverData",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

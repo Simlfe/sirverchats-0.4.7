@@ -1,0 +1,65 @@
+name: SirverChats quality gate
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  web:
+    name: Typecheck, unit tests, and web build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm run check:bundle
+
+  android:
+    name: Capacitor Android compile
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: android/**/*.gradle*
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npx cap sync android
+      - run: chmod +x android/gradlew
+      - working-directory: android
+        run: ./gradlew assembleDebug assembleRelease bundleRelease --no-daemon
+
+  tauri-linux:
+    name: Tauri Linux compile
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install WebKit and Linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev build-essential
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npx tauri build --ci --no-sign --bundles appimage,deb
