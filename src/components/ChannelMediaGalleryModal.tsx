@@ -16,7 +16,7 @@ import {
   Filter
 } from 'lucide-react';
 import { Channel, Message, User } from '../types';
-import { pbService } from '../pocketbase';
+import { pbService, getAttachmentUrl } from '../pocketbase';
 import AttachmentDownloadControl from './AttachmentDownloadControl';
 import UploadedImagePreview from './UploadedImagePreview';
 import { getAttachmentThumbnailUrl } from '../services/attachmentPreview';
@@ -63,24 +63,63 @@ export default function ChannelMediaGalleryModal({
     }> = [];
 
     messages.forEach((msg) => {
-      if (msg.attachments && Array.isArray(msg.attachments)) {
-        msg.attachments.forEach((att: any, idx: number) => {
-          const fileName = typeof att === 'string' ? att : att.file || att.name || 'file';
-          const fileType = att.type || (fileName.endsWith('.png') || fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') || fileName.endsWith('.webp') || fileName.endsWith('.gif') ? 'image/png' : fileName.endsWith('.mp4') || fileName.endsWith('.webm') ? 'video/mp4' : fileName.endsWith('.mp3') || fileName.endsWith('.wav') ? 'audio/mpeg' : 'application/octet-stream');
+      const rawAtts = [
+        ...(msg.expand?.["attachments(message)"] || []),
+        ...(msg.expand?.["private_attachments(message)"] || []),
+        ...(msg.expand?.attachments || []),
+        ...(msg.expand?.private_attachments || []),
+        ...(Array.isArray(msg.attachments) ? msg.attachments : []),
+      ];
 
-          items.push({
-            id: att.id || `${msg.id}-${idx}`,
-            messageId: msg.id,
-            messageDate: msg.created,
-            senderId: msg.sender,
-            senderName: msg.expand?.sender?.username || msg.expand?.sender?.display_name,
-            file: fileName,
-            type: fileType,
-            size: att.size,
-            rawAttachment: att,
-          });
+      const seenInMsg = new Set<string>();
+      rawAtts.forEach((att: any, idx: number) => {
+        if (!att) return;
+        const attId = typeof att === 'object' && att ? att.id : null;
+        const fileName = typeof att === 'string' ? att : att?.file || att?.name || 'file';
+        const dedupeKey = attId || `${msg.id}-${fileName}`;
+        if (seenInMsg.has(dedupeKey)) return;
+        seenInMsg.add(dedupeKey);
+
+        const fileType =
+          (typeof att === 'object' && att ? (att.type || att.mime) : '') ||
+          (fileName.endsWith('.png') || fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') || fileName.endsWith('.webp') || fileName.endsWith('.gif')
+            ? 'image/png'
+            : fileName.endsWith('.mp4') || fileName.endsWith('.webm')
+            ? 'video/mp4'
+            : fileName.endsWith('.mp3') || fileName.endsWith('.wav')
+            ? 'audio/mpeg'
+            : 'application/octet-stream');
+
+        const normalizedAtt = typeof att === 'object' && att
+          ? {
+              ...att,
+              id: att.id || `${msg.id}-${idx}`,
+              file: fileName,
+              type: fileType,
+              collectionName:
+                att.collectionName && att.collectionName !== 'messages'
+                  ? att.collectionName
+                  : att.isPrivate ? 'private_attachments' : 'attachments',
+            }
+          : {
+              id: `${msg.id}-${idx}`,
+              file: fileName,
+              type: fileType,
+              collectionName: 'attachments',
+            };
+
+        items.push({
+          id: normalizedAtt.id,
+          messageId: msg.id,
+          messageDate: msg.created,
+          senderId: msg.sender,
+          senderName: msg.expand?.sender?.username || msg.expand?.sender?.display_name,
+          file: fileName,
+          type: fileType,
+          size: typeof att === 'object' ? att.size : undefined,
+          rawAttachment: normalizedAtt,
         });
-      }
+      });
     });
 
     return items;
@@ -251,7 +290,7 @@ export default function ChannelMediaGalleryModal({
 
                   const fileUrl = item.file.startsWith('http') || item.file.startsWith('blob:')
                     ? item.file
-                    : pbService.getFileUrl({ id: item.messageId, collectionId: 'messages', collectionName: 'messages' }, item.file);
+                    : getAttachmentUrl(item.rawAttachment);
                   const thumbnailUrl = getAttachmentThumbnailUrl(item.rawAttachment);
 
                   return (
@@ -272,7 +311,8 @@ export default function ChannelMediaGalleryModal({
                       >
                         {isImg ? (
                           <UploadedImagePreview
-                            src={thumbnailUrl}
+                            src={thumbnailUrl || fileUrl}
+                            fallbackSrc={fileUrl}
                             useSourceDirect
                             alt={item.file}
                             className="w-full h-full object-cover group-hover/card:scale-105 transition-transform duration-300"

@@ -36,6 +36,8 @@ function isSchemaCompatibilityError(error: any): boolean {
   return /(?:collection|field|relation|expand|unknown\s+(?:field|collection|relation)|missing\s+(?:field|collection|relation)|does not exist|invalid schema|invalid filter)/.test(message);
 }
 
+let cachedMessageExpand = 'sender,reply_to,attachments(message),private_attachments(message)';
+
 export function mergeUserRecord(existing: User | null | undefined, updated: Partial<User> | null | undefined): User {
   if (!existing && !updated) {
     return {
@@ -1946,22 +1948,22 @@ class PocketBaseService {
         requestKey,
       });
       try {
-        // Current schemas expose the reverse relation directly. This avoids
-        // the deprecated `attachments(message)` expansion on the hot path.
         records = await this.withReadDeadline(
-          () => query('sender,reply_to,attachments_via_message,private_attachments_via_message'),
+          () => query(cachedMessageExpand),
           requestKey,
           options?.timeoutMs,
         );
       } catch (schemaError) {
         if (!isSchemaCompatibilityError(schemaError)) throw schemaError;
-        // Older PocketBase collections still use the legacy expansion. This
-        // fallback is schema-only; transport/530/5xx errors never fan out.
+        const fallbackExpand = cachedMessageExpand.includes('attachments(')
+          ? 'sender,reply_to,attachments_via_message,private_attachments_via_message'
+          : 'sender,reply_to,attachments(message),private_attachments(message)';
         records = await this.withReadDeadline(
-          () => query('sender,reply_to,attachments(message),private_attachments(message)'),
+          () => query(fallbackExpand),
           requestKey,
           options?.timeoutMs,
         );
+        cachedMessageExpand = fallbackExpand;
       }
     } catch (err: any) {
       throw new PocketBaseUnavailableError(
@@ -2023,17 +2025,21 @@ class PocketBaseService {
       });
       try {
         records = await this.withReadDeadline(
-          () => query('sender,reply_to,attachments_via_message,private_attachments_via_message'),
+          () => query(cachedMessageExpand),
           requestKey,
           options?.timeoutMs,
         );
       } catch (schemaError) {
         if (!isSchemaCompatibilityError(schemaError)) throw schemaError;
+        const fallbackExpand = cachedMessageExpand.includes('attachments(')
+          ? 'sender,reply_to,attachments_via_message,private_attachments_via_message'
+          : 'sender,reply_to,attachments(message),private_attachments(message)';
         records = await this.withReadDeadline(
-          () => query('sender,reply_to,attachments(message),private_attachments(message)'),
+          () => query(fallbackExpand),
           requestKey,
           options?.timeoutMs,
         );
+        cachedMessageExpand = fallbackExpand;
       }
     } catch (err: any) {
       throw new PocketBaseUnavailableError(

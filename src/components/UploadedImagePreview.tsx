@@ -4,6 +4,7 @@ import { getEffectiveGifPlaybackMode, getGifFirstFrame } from '../lib/gifFrameHe
 
 export interface UploadedImagePreviewProps extends React.ImgHTMLAttributes<HTMLImageElement> {
   src: string;
+  fallbackSrc?: string;
   alt?: string;
   width?: number;
   height?: number;
@@ -315,6 +316,7 @@ export function preloadUploadedImage(
 
 function UploadedImagePreviewComponent({
   src,
+  fallbackSrc,
   alt = 'Attachment',
   width,
   height,
@@ -378,23 +380,29 @@ function UploadedImagePreviewComponent({
   const [previewSrc, setPreviewSrc] = useState<string>(() => useSourceDirect ? src : (cachedEntry ? cachedEntry.previewUrl : ''));
   const [loading, setLoading] = useState<boolean>(() => useSourceDirect ? false : !cachedEntry);
   const [imageLoaded, setImageLoaded] = useState<boolean>(Boolean(cachedEntry));
+  const [hasTriedFallback, setHasTriedFallback] = useState(false);
   const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    setHasTriedFallback(false);
+  }, [src, fallbackSrc]);
 
   // Eagerly process and pre-decode preview images in advance
   useEffect(() => {
     isMountedRef.current = true;
     if (useSourceDirect) {
+      const activeSrc = (hasTriedFallback && fallbackSrc) ? fallbackSrc : src;
       const directEntry: CacheEntry = {
-        previewUrl: src,
-        originalUrl: src,
+        previewUrl: activeSrc,
+        originalUrl: activeSrc,
         width: Number(width) || maxPreviewWidth,
         height: Number(height) || maxPreviewHeight,
         created: Date.now(),
         isObjectUrl: false,
       };
-      attachmentDimensionsCache.set(src, { width: directEntry.width, height: directEntry.height });
+      attachmentDimensionsCache.set(activeSrc, { width: directEntry.width, height: directEntry.height });
       setCachedEntry(directEntry);
-      setPreviewSrc(src);
+      setPreviewSrc(activeSrc);
       setLoading(false);
       return () => {
         isMountedRef.current = false;
@@ -480,6 +488,11 @@ function UploadedImagePreviewComponent({
           onLoad?.(e);
         }}
         onError={(e) => {
+          if (fallbackSrc && !hasTriedFallback && fallbackSrc !== previewSrc) {
+            setHasTriedFallback(true);
+            setPreviewSrc(fallbackSrc);
+            return;
+          }
           setImageLoaded(true);
           setLoading(false);
           onError?.(e);

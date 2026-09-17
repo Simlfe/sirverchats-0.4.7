@@ -1675,11 +1675,14 @@ export default function App() {
 
         if (currentActiveChan && fullMsg.channel === currentActiveChan.id) {
           setMessages((prev) => {
+            const incomingSenderId = fullMsg.sender || (fullMsg as any).user;
+            const incomingContent = (fullMsg.content || '').trim();
             const existingIdx = prev.findIndex(
               (m) =>
                 m.id === fullMsg.id ||
-                ((m as any).temp_id && m.sender === fullMsg.sender && m.content === fullMsg.content) ||
-                (m.id.startsWith('optimistic-') && m.sender === fullMsg.sender && m.content === fullMsg.content)
+                ((m as any).temp_id && (fullMsg as any).temp_id && (m as any).temp_id === (fullMsg as any).temp_id) ||
+                ((m as any).temp_id && (m.sender === incomingSenderId || (m.expand?.sender?.id && m.expand.sender.id === incomingSenderId)) && (m.content || '').trim() === incomingContent) ||
+                (m.id.startsWith('optimistic-') && (m.sender === incomingSenderId || (m.expand?.sender?.id && m.expand.sender.id === incomingSenderId)) && (m.content || '').trim() === incomingContent)
             );
 
             if (existingIdx === -1) {
@@ -1797,11 +1800,13 @@ export default function App() {
 
         if (isCurrentlyViewingDM && currentActiveChan) {
           setMessages((prev) => {
+            const incomingContent = (fullMsg.content || '').trim();
             const existingIdx = prev.findIndex(
               (m) =>
                 m.id === fullMsg.id ||
-                ((m as any).temp_id && m.sender === fullMsg.sender && m.content === fullMsg.content) ||
-                (m.id.startsWith('optimistic-') && m.sender === fullMsg.sender && m.content === fullMsg.content)
+                ((m as any).temp_id && (fullMsg as any).temp_id && (m as any).temp_id === (fullMsg as any).temp_id) ||
+                ((m as any).temp_id && (m.sender === senderId || (m.expand?.sender?.id && m.expand.sender.id === senderId)) && (m.content || '').trim() === incomingContent) ||
+                (m.id.startsWith('optimistic-') && (m.sender === senderId || (m.expand?.sender?.id && m.expand.sender.id === senderId)) && (m.content || '').trim() === incomingContent)
             );
 
             let updated: Message[];
@@ -2901,12 +2906,15 @@ export default function App() {
     (async () => {
       try {
         let msg: Message;
-        if (isDmChannel && targetUsername) {
-          const matchingUsers = await pbService.searchUsers(targetUsername);
-          const targetUser = matchingUsers.find(u => u.username.toLowerCase() === targetUsername.toLowerCase());
+        if (isDmChannel) {
+          let targetUser = activeChannel.recipientUser || (targetUsername ? allDmChannels.find(c => c.recipientUser?.username?.toLowerCase() === targetUsername.toLowerCase())?.recipientUser : null);
+          if (!targetUser && targetUsername) {
+            const matchingUsers = await pbService.searchUsers(targetUsername);
+            targetUser = matchingUsers.find(u => u.username.toLowerCase() === targetUsername.toLowerCase()) || null;
+          }
           if (targetUser) {
-            const privateChatServer = await pbService.getOrCreatePrivateChatServer(targetUser.id);
-            msg = await pbService.sendDirectMessage(targetUser.id, finalContent, replyToId, privateChatServer?.id, hasAttachment);
+            const chatServerId = activeChannel.id.startsWith('dm-server-') ? activeChannel.id.replace(/^dm-server-/, '') : undefined;
+            msg = await pbService.sendDirectMessage(targetUser.id, finalContent, replyToId, chatServerId, hasAttachment);
           } else {
             msg = await pbService.sendMessage(activeChannel.id, finalContent, replyToId, hasAttachment);
           }
@@ -2917,8 +2925,12 @@ export default function App() {
         const realMsgId = msg.id;
 
         // Immediately update optimistic echo with real message id in local state preserving stable temp_id & attachments
-        setMessages((prev) =>
-          prev.map((m) => {
+        setMessages((prev) => {
+          const alreadyHasReal = prev.some((m) => m.id === realMsgId);
+          if (alreadyHasReal) {
+            return prev.filter((m) => m.id !== tempId && (m as any).temp_id !== tempId);
+          }
+          return prev.map((m) => {
             if (m.id === tempId || (m as any).temp_id === tempId) {
               const currentAtts = m.expand?.['attachments(message)'] || m.expand?.['private_attachments(message)'] || optimisticAttachmentsList;
               return {
@@ -2935,8 +2947,8 @@ export default function App() {
               };
             }
             return m;
-          })
-        );
+          });
+        });
 
         // Handle pre-uploaded attachments from background upload manager
         if (uploadedAttachments && uploadedAttachments.length > 0) {

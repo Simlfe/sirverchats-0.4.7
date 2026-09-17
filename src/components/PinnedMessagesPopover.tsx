@@ -252,6 +252,7 @@ export default function PinnedMessagesPopover({
                                 {pinnedNonAudio.length > 4 ? (
                                   <div className="grid grid-cols-2 gap-1.5 mt-1">
                                     {pinnedNonAudio.slice(0, 3).map((a) => {
+                                      const aUrl = getAttachmentUrl(a);
                                       const previewUrl = getAttachmentThumbnailUrl(a);
                                       const isFailed = failedImageIds.has(a.id);
                                       const isUnrenderable = isAttachmentUnrenderable(
@@ -272,7 +273,8 @@ export default function PinnedMessagesPopover({
                                         >
                                           {isImg ? (
                                             <UploadedImagePreview
-                                              src={previewUrl}
+                                              src={previewUrl || aUrl}
+                                              fallbackSrc={aUrl}
                                               useSourceDirect
                                               alt="Attachment"
                                               maxPreviewWidth={300}
@@ -374,7 +376,8 @@ export default function PinnedMessagesPopover({
                                       return (
                                         <UploadedImagePreview
                                           key={a.id}
-                                          src={previewUrl}
+                                          src={previewUrl || aUrl}
+                                          fallbackSrc={aUrl}
                                           useSourceDirect
                                           alt="Attachment"
                                           maxPreviewWidth={480}

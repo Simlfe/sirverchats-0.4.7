@@ -67,8 +67,26 @@ function mergeRelationRevision(message: Message | undefined): string {
 export function dedupeMessages(messages: Message[], maxItems?: number): Message[] {
   const byId = new Map<string, Message>();
   const optimisticBySignature = new Map<string, string>();
+  const confirmedTempIds = new Set<string>();
+
   for (const message of messages) {
     if (!message?.id || message.deleted || message.deleted_at) continue;
+    const isOpt = message.is_pending || message.id.startsWith('optimistic-');
+    const tempId = (message as any).temp_id;
+    if (!isOpt) {
+      if (tempId) confirmedTempIds.add(tempId);
+    }
+  }
+
+  for (const message of messages) {
+    if (!message?.id || message.deleted || message.deleted_at) continue;
+    const isOpt = message.is_pending || message.id.startsWith('optimistic-');
+    const tempId = (message as any).temp_id;
+
+    if (isOpt && (confirmedTempIds.has(message.id) || (tempId && confirmedTempIds.has(tempId)))) {
+      continue;
+    }
+
     const existing = byId.get(message.id);
     // A cached row can have the same id as a freshly fetched row but lack
     // sender/reply/attachment expansion. Prefer the richer incoming record so
@@ -91,11 +109,15 @@ export function dedupeMessages(messages: Message[], maxItems?: number): Message[
     if (!existing || (!message.is_pending && existing.is_pending) || (!message.is_pending && !existing?.is_pending && (incomingIsRicher || incomingIsNewer))) {
       byId.set(message.id, message);
     }
+
+    if (!isOpt && tempId) {
+      byId.delete(tempId);
+    }
+
     const sender = message.sender || message.expand?.sender?.id || '';
-    const signature = sender && message.content?.trim()
-      ? `${sender}|${message.content.trim()}`
-      : '';
-    if (signature && !message.is_pending && message.id && !message.id.startsWith('optimistic-')) {
+    const content = (message.content || '').trim();
+    const signature = sender ? `${sender}|${content}` : '';
+    if (signature && !isOpt && message.id && !message.id.startsWith('optimistic-')) {
       const optimisticId = optimisticBySignature.get(signature);
       if (optimisticId) byId.delete(optimisticId);
     } else if (signature && (message.is_pending || message.id.startsWith('optimistic-'))) {

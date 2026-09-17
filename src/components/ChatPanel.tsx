@@ -2493,7 +2493,9 @@ function ChatPanel({
 
   // Optimized chronological message sorting, search filtering, and deduplication
   const { sortedMessages, messageLookup } = React.useMemo(() => {
-    const map = new Map<string, Message>();
+    const lookup = new Map<string, Message>();
+    const confirmedMap = new Map<string, Message>();
+    const confirmedTempIds = new Set<string>();
     const nonOptimisticKeys = new Set<string>();
 
     // First pass: index confirmed server messages
@@ -2506,18 +2508,29 @@ function ChatPanel({
       ) {
         const isOptimistic = msg.id.startsWith("optimistic-") || (msg as any).is_pending;
         if (!isOptimistic) {
-          map.set(msg.id, msg);
+          confirmedMap.set(msg.id, msg);
+          lookup.set(msg.id, msg);
           const tempId = (msg as any).temp_id;
-          if (tempId) map.set(tempId, msg);
+          if (tempId) {
+            confirmedTempIds.add(tempId);
+            lookup.set(tempId, msg);
+          }
           const sId = msg.sender || msg.expand?.sender?.id;
-          if (sId && msg.content) {
-            nonOptimisticKeys.add(`${sId}_${msg.content.trim()}`);
+          if (sId) {
+            const trimmed = (msg.content || "").trim();
+            nonOptimisticKeys.add(`${sId}_${trimmed}`);
+            if (msg.has_attachment) {
+              nonOptimisticKeys.add(`${sId}_att`);
+            }
           }
         }
       }
     }
 
     // Second pass: add optimistic messages that aren't already represented by a confirmed message
+    const uniqueMessages: Message[] = Array.from(confirmedMap.values());
+    const optimisticIdsAdded = new Set<string>();
+
     for (const msg of displayedMessages) {
       if (
         msg.id &&
@@ -2527,12 +2540,24 @@ function ChatPanel({
       ) {
         const isOptimistic = msg.id.startsWith("optimistic-") || (msg as any).is_pending;
         if (isOptimistic) {
-          const sId = msg.sender || msg.expand?.sender?.id;
-          const key = sId && msg.content ? `${sId}_${msg.content.trim()}` : null;
           const tempId = (msg as any).temp_id;
-          const alreadyInMap = map.has(msg.id) || (tempId && map.has(tempId));
-          if (!alreadyInMap && (!key || !nonOptimisticKeys.has(key))) {
-            map.set(msg.id, msg);
+          const isAlreadyConfirmed =
+            confirmedMap.has(msg.id) ||
+            confirmedTempIds.has(msg.id) ||
+            (tempId && (confirmedMap.has(tempId) || confirmedTempIds.has(tempId)));
+
+          const sId = msg.sender || msg.expand?.sender?.id;
+          const trimmed = (msg.content || "").trim();
+          const key = sId ? `${sId}_${trimmed}` : null;
+          const isKeyRepresented = key ? nonOptimisticKeys.has(key) : false;
+          const isAttRepresented = msg.has_attachment && sId ? nonOptimisticKeys.has(`${sId}_att`) : false;
+
+          if (!isAlreadyConfirmed && !isKeyRepresented && !isAttRepresented && !optimisticIdsAdded.has(msg.id)) {
+            optimisticIdsAdded.add(msg.id);
+            if (tempId) optimisticIdsAdded.add(tempId);
+            uniqueMessages.push(msg);
+            lookup.set(msg.id, msg);
+            if (tempId) lookup.set(tempId, msg);
           }
         }
       }
@@ -2541,7 +2566,7 @@ function ChatPanel({
     // Keep rendering order identical to the cursor contract. `created` is not
     // unique, so the ID tie-breaker prevents equal-timestamp rows from
     // jumping around between virtualizer passes.
-    let sorted = Array.from(map.values()).sort(compareMessageOrder);
+    let sorted = uniqueMessages.sort(compareMessageOrder);
 
     if (channelSearchQuery.trim()) {
       const q = channelSearchQuery.trim().toLowerCase();
@@ -2554,10 +2579,12 @@ function ChatPanel({
       });
     }
 
-    return { sortedMessages: sorted, messageLookup: map };
+    return { sortedMessages: sorted, messageLookup: lookup };
   }, [displayedMessages, channelSearchQuery]);
 
   const totalMessagesCount = sortedMessages.length;
+
+  const requestedUserIdsRef = useRef<Set<string>>(new Set());
 
   // Resolve sender profiles for the currently rendered window in one
   // coalesced batch. `resolveSenderUser` is called from render/measurement
@@ -2575,9 +2602,11 @@ function ChatPanel({
         .map((message) => getSenderId(message))
         .filter((id): id is string => Boolean(id))
         .filter((id) => !currentUser?.id || id !== currentUser.id)
-        .filter((id) => !pbService.getCachedUser(id) && !allUsersList.some((user) => user.id === id)),
+        .filter((id) => !pbService.getCachedUser(id) && !requestedUserIdsRef.current.has(id)),
     ));
     if (ids.length === 0) return;
+
+    ids.forEach((id) => requestedUserIdsRef.current.add(id));
 
     let active = true;
     pbService.fetchUsersByIds(ids).then((users) => {
@@ -2590,7 +2619,7 @@ function ChatPanel({
     }).catch(() => {});
 
     return () => { active = false; };
-  }, [sortedMessages, allUsersList, currentUser?.id, virtualRangeVersion]);
+  }, [sortedMessages, currentUser?.id, virtualRangeVersion]);
 
   // Proactively preload only nearby thumbnails (never full-resolution files)
   // and external link previews. This runs during idle time and is capped to a
@@ -6168,7 +6197,8 @@ function ChatPanel({
                                                   >
                                                     {isImage ? (
                                                       <UploadedImagePreview
-                                                        src={previewUrl}
+                                                        src={previewUrl || downloadUrl}
+                                                        fallbackSrc={downloadUrl}
                                                         useSourceDirect
                                                         alt="Attachment"
                                                         maxPreviewWidth={300}
@@ -6291,7 +6321,8 @@ function ChatPanel({
                                                 >
                                                   {isImage ? (
                                                     <UploadedImagePreview
-                                                      src={previewUrl}
+                                                      src={previewUrl || downloadUrl}
+                                                      fallbackSrc={downloadUrl}
                                                       useSourceDirect
                                                       alt="Attachment"
                                                       maxPreviewWidth={300}
@@ -6434,7 +6465,8 @@ function ChatPanel({
                                               >
                                                 <div className="relative w-fit max-w-full flex items-center justify-center">
                                                   <UploadedImagePreview
-                                                    src={previewUrl}
+                                                    src={previewUrl || downloadUrl}
+                                                    fallbackSrc={downloadUrl}
                                                     useSourceDirect
                                                     alt="Attachment"
                                                     width={attach.width}
@@ -8380,6 +8412,7 @@ function ChatPanel({
                         attach.type,
                       );
                       const thumbnailUrl = getAttachmentThumbnailUrl(attach);
+                      const downloadUrl = getAttachmentUrl(attach);
 
                       return (
                         <div
@@ -8394,7 +8427,8 @@ function ChatPanel({
                         >
                           {isImage ? (
                             <UploadedImagePreview
-                              src={thumbnailUrl}
+                              src={thumbnailUrl || downloadUrl}
+                              fallbackSrc={downloadUrl}
                               alt={attach.file}
                               maxPreviewWidth={400}
                               maxPreviewHeight={400}

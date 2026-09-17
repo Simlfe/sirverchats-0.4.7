@@ -1,5 +1,21 @@
 # Sirver Application Changelog
 
+## [3.9-chat-dedup-image-and-speed-fix] - 2026-09-17
+### Fix image loading, double message sending, and chat loading performance
+- Fixed image loading failures by updating `getAttachmentThumbnailUrl` in `src/services/attachmentPreview.ts` to return direct media URLs rather than requesting ungenerated server-side thumbnail query parameters (`thumb=480x480f`) that caused HTTP 404 errors.
+- Enhanced `UploadedImagePreview` with resilient fallback image handling, ensuring failed previews smoothly transition to fallback URLs without being overwritten.
+- Fixed the double message glitch when sending messages by cleanly separating unique message lists from the lookup map in `ChatPanel.tsx`, eliminating duplicate entries created by multi-key indexing.
+- Enhanced `dedupeMessages` in `src/services/messagePagination.ts` to track confirmed `temp_id` values and prune stale optimistic messages upon receipt of real messages.
+- Improved realtime message matching in `App.tsx` (`subscribeToMessages` and `subscribeToPrivateMessages`) by matching against normalized sender IDs, trimmed content, and `temp_id`, preventing duplicate optimistic and realtime messages from coexisting.
+- Drastically reduced message send and chat switch latency by:
+  - Caching known PocketBase message relation expansion strings in `src/pocketbase.ts`, preventing initial HTTP 400 schema error roundtrips on every channel/DM switch.
+  - Directly resolving recipient users and private chat server IDs in `handleSendMessage` using existing channel metadata, eliminating 2–3 redundant API queries per sent direct message.
+  - Throttling and tracking pending user profile lookups in `ChatPanel.tsx` via `requestedUserIdsRef`, eliminating infinite re-render fetch loops in visible viewport ranges.
+### Safe media thumbnails, fallback resolution, and gallery collection normalization
+- Fixed image loading in `ChannelMediaGalleryModal` by resolving attachments from expanded PocketBase collections (`attachments(message)`, `private_attachments(message)`) and using `getAttachmentUrl` instead of invalid hardcoded `messages` collection IDs.
+- Added MIME-type gating to `getAttachmentThumbnailUrl` in `src/services/attachmentPreview.ts` so PocketBase `?thumb=480x480f` parameters are only requested for supported image/video media, preventing 404 errors on non-media attachments.
+- Added fallback URL recovery (`fallbackSrc`) to `UploadedImagePreview` across chat feeds, pinned messages, and gallery modals, ensuring images smoothly fall back to the original attachment URL if a thumbnail fails to generate or load.
+
 ## [3.9-web-release-and-landing-refresh] - 2026-09-17
 ### Faster web startup, exact release identity, and versioned public downloads
 - Replaced the duplicated all-theme Google Fonts request with one three-family core stylesheet. Decorative theme fonts now load on demand only when the active theme selects them.
