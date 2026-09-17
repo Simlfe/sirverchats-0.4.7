@@ -20,4 +20,8 @@ test('Android entry points and CI cannot silently build the legacy Capacitor she
   assert.doesNotMatch(workflow, /cap sync|working-directory: android|path: android\//);
   assert.match(workflow, /src-tauri\/gen\/android\/app\/build\/outputs/);
   assert.match(workflow, /if-no-files-found: error/);
+  const quality = readFileSync(new URL('../.github/workflows/quality.yml', import.meta.url), 'utf8');
+  assert.doesNotMatch(quality, /cap sync|working-directory: android|Capacitor Android/);
+  assert.match(quality, /npm run build:android:apk/);
+  assert.match(quality, /aarch64-linux-android/);
 });
