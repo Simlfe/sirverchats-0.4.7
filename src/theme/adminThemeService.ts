@@ -1,5 +1,6 @@
 import { DEFAULT_BUILTIN_THEMES, PRESET_WALLPAPERS, WallpaperPreset } from './builtinThemes';
 import { AVAILABLE_FONTS, DEFAULT_LAYOUT_SETTINGS, FontOption, createThemeLayout } from './themeDefaults';
+import { loadThemeFonts } from './fontLoader';
 import { pbService, getAttachmentUrl } from '../pocketbase';
 export { DEFAULT_BUILTIN_THEMES, DEFAULT_LAYOUT_SETTINGS, PRESET_WALLPAPERS, type WallpaperPreset, AVAILABLE_FONTS, type FontOption, createThemeLayout };
 
@@ -814,6 +815,8 @@ export function applyThemeTokensAndLayout(
           ? fontOverride
           : (layout.typography.fontChat || family)
       );
+
+      loadThemeFonts(family, headings, chat);
 
       newProps.set('--font-family', family);
       newProps.set('--font-family-headings', headings);

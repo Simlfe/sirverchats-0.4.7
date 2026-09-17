@@ -1,5 +1,6 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import { execFileSync } from 'node:child_process';
 import path from 'path';
 import { defineConfig, Plugin } from 'vite';
 import ENDPOINTS from './src/config/endpoints';
@@ -133,9 +134,35 @@ function livekitCorsPlugin(): Plugin {
   };
 }
 
+function releaseMetadataPlugin(): Plugin {
+  let sourceCommit = process.env.GITHUB_SHA || 'unknown';
+  if (sourceCommit === 'unknown') {
+    try {
+      sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    } catch {}
+  }
+
+  return {
+    name: 'sirverdata-release-metadata',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'release.json',
+        source: JSON.stringify({
+          product: 'SirverData',
+          version: process.env.npm_package_version || '1.0.0',
+          sourceCommit,
+          apiV2Bootstrap: process.env.VITE_ENABLE_API_V2_BOOTSTRAP === 'true',
+          builtAt: new Date().toISOString(),
+        }, null, 2),
+      });
+    },
+  };
+}
+
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss(), livekitCorsPlugin()],
+    plugins: [react(), tailwindcss(), livekitCorsPlugin(), releaseMetadataPlugin()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

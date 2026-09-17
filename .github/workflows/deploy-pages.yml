@@ -2,6 +2,12 @@ name: Deploy web app to Cloudflare Pages
 
 on:
   workflow_dispatch:
+    inputs:
+      enable_api_v2:
+        description: Enable the API v2 bootstrap after a canary has passed
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   deploy:
@@ -13,7 +19,7 @@ jobs:
       # The production gateway is now healthy and provides the single
       # authenticated bootstrap/message read path. Keep the URL explicit so a
       # Pages build cannot accidentally fall back to a stale preview host.
-      VITE_ENABLE_API_V2_BOOTSTRAP: 'true'
+      VITE_ENABLE_API_V2_BOOTSTRAP: ${{ inputs.enable_api_v2 }}
       VITE_API_V2_URL: https://chat.sirverdata.top/api/v2
     steps:
       - name: Checkout repository
@@ -52,8 +58,9 @@ jobs:
         run: |
           for attempt in $(seq 1 12); do
             html="$(curl --retry 3 --retry-all-errors -fsS https://app.sirverdata.top/ || true)"
-            if printf '%s' "${html}" | grep -q 'assets/index-'; then
-              echo 'app.sirverdata.top is serving the production web app'
+            release="$(curl --retry 3 --retry-all-errors -fsS https://app.sirverdata.top/release.json || true)"
+            if printf '%s' "${html}" | grep -q 'assets/index-' && printf '%s' "${release}" | grep -q "${GITHUB_SHA}"; then
+              echo 'app.sirverdata.top is serving this exact production release'
               exit 0
             fi
             sleep 10

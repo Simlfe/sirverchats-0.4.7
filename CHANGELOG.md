@@ -1,5 +1,13 @@
 # Sirver Application Changelog
 
+## [3.9-web-release-and-landing-refresh] - 2026-09-17
+### Faster web startup, exact release identity, and versioned public downloads
+- Replaced the duplicated all-theme Google Fonts request with one three-family core stylesheet. Decorative theme fonts now load on demand only when the active theme selects them.
+- Added generated `release.json` metadata so production verification can prove the deployed commit, version, build time, and API-v2 rollout state instead of accepting any older app shell.
+- Made the Cloudflare Pages API-v2 bootstrap an explicit opt-in deployment input. The default web rollout keeps the canary-only path disabled.
+- Added the version-controlled `sirverdata.top` landing page with the real application icon, deterministic 1200×630 social preview, truthful performance copy, responsive product preview, and four current platform downloads.
+- Standardized release filenames as `SirverData-1.0.0-<platform>-<arch>.<ext>` and identified Android as the signed Tauri build.
+
 ## [3.9-tauri-android-build] - 2026-09-17
 ### Android build pipeline uses the shared Tauri/Rust application
 - Routed every Android npm build entry point and CI artifact path to Tauri instead of Capacitor. Default APKs cover ARM64 and ARMv7, with validated target overrides for emulator builds.
