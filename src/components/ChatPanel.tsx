@@ -1024,6 +1024,7 @@ function ChatPanel({
       if (liveAnchor) {
         loadMoreScrollAnchorRef.current = {
           prevMessagesCount: sortedMessages.length,
+          prevOldestMessageId: sortedMessages[0]?.id || null,
           prevScrollHeight: scrollEl.scrollHeight,
           prevScrollTop: scrollEl.scrollTop,
           anchorMsgId: liveAnchor.anchorMsgId,
@@ -1047,6 +1048,7 @@ function ChatPanel({
           : (sortedMessages[0]?.id ? `msg-${sortedMessages[0].id}` : null);
         loadMoreScrollAnchorRef.current = {
           prevMessagesCount: sortedMessages.length,
+          prevOldestMessageId: sortedMessages[0]?.id || null,
           prevScrollHeight: scrollEl.scrollHeight,
           prevScrollTop: scrollEl.scrollTop,
           anchorMsgId: chosenId,
@@ -2364,6 +2366,7 @@ function ChatPanel({
 
   const loadMoreScrollAnchorRef = useRef<{
     prevMessagesCount: number;
+    prevOldestMessageId: string | null;
     prevScrollHeight: number;
     prevScrollTop: number;
     anchorMsgId: string | null;
@@ -2940,15 +2943,17 @@ function ChatPanel({
     // and we're waiting for the scroll anchor restoration useLayoutEffect to run.
     if (
       loadMoreScrollAnchorRef.current &&
-      sortedMessages.length > loadMoreScrollAnchorRef.current.prevMessagesCount
+      (
+        sortedMessages.length > loadMoreScrollAnchorRef.current.prevMessagesCount ||
+        sortedMessages[0]?.id !== loadMoreScrollAnchorRef.current.prevOldestMessageId
+      )
     ) {
       return;
     }
 
-    // For feeds with <= 600 messages (the entire active channel history, capped at MAX_ACTIVE_MESSAGES 500),
-    // render all items directly. Modern browsers render 600 messages with sub-millisecond paint and zero jank,
-    // and this completely eliminates top/bottom spacer shifts, unmount/remount blinking, and scroll shaking.
-    if (total <= 600) {
+    // Small feeds do not need virtualization. The normal retained window is
+    // 500 rich rows, so it must stay on the measured virtual path.
+    if (total <= 100) {
       const current = virtualRangeRef.current;
       if (
         current.startIndex !== 0 ||
@@ -3020,7 +3025,10 @@ function ChatPanel({
   useLayoutEffect(() => {
     if (
       loadMoreScrollAnchorRef.current &&
-      sortedMessages.length > loadMoreScrollAnchorRef.current.prevMessagesCount
+      (
+        sortedMessages.length > loadMoreScrollAnchorRef.current.prevMessagesCount ||
+        sortedMessages[0]?.id !== loadMoreScrollAnchorRef.current.prevOldestMessageId
+      )
     ) {
       return;
     }
@@ -3062,7 +3070,7 @@ function ChatPanel({
 
   const { startIndex, endIndex, topSpacerHeight, bottomSpacerHeight } =
     React.useMemo(() => {
-      if (totalMessagesCount <= 150) {
+      if (totalMessagesCount <= 100) {
         return {
           startIndex: 0,
           endIndex: Math.max(0, totalMessagesCount - 1),
@@ -3074,7 +3082,10 @@ function ChatPanel({
       // If older messages were prepended and we're restoring anchor, ensure the anchor message is in visible range
       if (
         loadMoreScrollAnchorRef.current?.anchorMsgId &&
-        sortedMessages.length > loadMoreScrollAnchorRef.current.prevMessagesCount
+        (
+          sortedMessages.length > loadMoreScrollAnchorRef.current.prevMessagesCount ||
+          sortedMessages[0]?.id !== loadMoreScrollAnchorRef.current.prevOldestMessageId
+        )
       ) {
         const rawAnchorId = loadMoreScrollAnchorRef.current.anchorMsgId.replace(/^msg-/, '');
         const anchorIdx = sortedMessages.findIndex(
@@ -3121,8 +3132,12 @@ function ChatPanel({
     const scrollEl = scrollRef.current;
     if (loadMoreScrollAnchorRef.current) {
       const anchorData = loadMoreScrollAnchorRef.current;
-      // Wait until the prepended messages have actually been merged into sortedMessages
-      if (sortedMessages.length <= anchorData.prevMessagesCount) {
+      // A capped prepend can replace 50 newest rows while keeping length 500.
+      // The oldest stable ID is the authoritative window-movement signal.
+      const windowMoved =
+        sortedMessages.length > anchorData.prevMessagesCount ||
+        sortedMessages[0]?.id !== anchorData.prevOldestMessageId;
+      if (!windowMoved) {
         return;
       }
       loadMoreScrollAnchorRef.current = null;

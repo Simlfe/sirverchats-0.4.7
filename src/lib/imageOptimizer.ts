@@ -5,8 +5,6 @@
  * Animated GIFs preserve their animation format.
  */
 
-import { optimizeGif } from './gifOptimizer';
-
 export interface ImageOptimizationOptions {
   maxWidth?: number;
   maxHeight?: number;
@@ -22,6 +20,9 @@ export async function optimizeImage(
   // Optimize animated GIFs while preserving animation format & quality
   if (file.type === 'image/gif') {
     const targetMax = Math.max(maxWidth, maxHeight, 960);
+    // gifsicle/WASM is large and is irrelevant to ordinary chat reading and
+    // static image uploads. Load it only after the user selects a GIF.
+    const { optimizeGif } = await import('./gifOptimizer');
     return optimizeGif(file, { maxEdge: targetMax, lossy: 25 });
   }
 

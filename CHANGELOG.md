@@ -1,5 +1,17 @@
 # Sirver Application Changelog
 
+## [3.9-chat-history-critical-path] - 2026-09-17
+### Paint-before-persistence, capped-window pagination, and real feed virtualization
+- Successful channel and DM pages now update React and the in-memory cache before their IndexedDB writes are queued. Per-conversation persistence is serialized in the background and page/metadata records commit in one transaction.
+- Older cached history uses an exact cursor-key lookup instead of listing, flattening and sorting every persisted page for each scroll action. Partial memory hydration no longer hides pages that exist on disk.
+- A retained 500-message window now detects older movement from stable message IDs rather than requiring the array length to grow, and scroll-anchor restoration uses the same window-revision signal.
+- Rich 500-row feeds stay virtualized with variable-height spacers and overscan instead of mounting every message card. Only small feeds bypass virtualization.
+- Message reconciliation now observes sender/reply hydration and attachment thumbnail metadata, preventing same-count attachment updates from remaining visually stale.
+- Bootstrap callers share the active gateway request and recover after a retryable failure. The deployed `{items}` DM envelope is normalized and invalid response shapes fail explicitly.
+- Valid empty final pages now record remote exhaustion instead of causing an endless load-more loop.
+- GIF/WASM optimization is dynamically loaded only after a GIF is selected, reducing the initial JavaScript bundle from 439.4 KiB to 298.0 KiB gzip. Noncritical startup work now waits through a real paint opportunity.
+- Added regression tests for equal-length capped-window movement, thumbnail/profile reconciliation, DM envelope handling, and post-paint scheduling.
+
 ## [3.9-voice-join-critical-path] - 2026-09-17
 ### Single-capture microphone join, direct production token routing, and cancellable room switching
 - Production web/native clients now call the configured `chat.sirverdata.top` token endpoint directly; the same-origin `/livekit/token` proxy is restricted to the local Vite development server that actually implements it.

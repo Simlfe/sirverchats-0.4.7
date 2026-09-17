@@ -27,3 +27,36 @@ test('v2 message reads send the shared cursor as explicit tie-breaker fields', a
     globalThis.fetch = originalFetch;
   }
 });
+
+test('v2 DM summaries normalize the deployed {items} envelope', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    items: [{
+      id: 'dm-1',
+      created: '2026-01-01T00:00:00.000Z',
+      counterpart: { id: 'u-2', username: 'other' },
+    }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  try {
+    const client = new ApiV2Client('https://chat.example.test/api/v2', () => 'token');
+    const dms = await client.dms();
+    assert.equal(dms.length, 1);
+    assert.equal(dms[0].id, 'dm-1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('v2 DM summaries reject contract drift instead of silently iterating an object', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ results: [] }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+  try {
+    const client = new ApiV2Client('https://chat.example.test/api/v2', () => 'token');
+    await assert.rejects(() => client.dms(), /invalid DM summary envelope/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

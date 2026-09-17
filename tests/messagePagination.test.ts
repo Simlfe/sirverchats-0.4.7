@@ -4,7 +4,9 @@ import {
   buildOlderMessageFilter,
   cursorFromMessage,
   dedupeMessages,
+  didMessageWindowMoveOlder,
   mergeMessagePage,
+  mergeOlderMessagePage,
   normalizeMessagePage,
   paginateMessages,
   revealCachedMessages,
@@ -46,6 +48,20 @@ test('dedupe keeps the confirmed message over an optimistic echo', () => {
   assert.deepEqual(result.map((item) => item.id), ['m-5']);
 });
 
+test('dedupe accepts refreshed metadata for the same attachment count', () => {
+  const created = '2026-01-01T00:00:00.000Z';
+  const previous = {
+    ...message('m-5', created),
+    attachments: [{ id: 'a-1', file: 'photo.jpg', thumbnail: 'old.webp' }],
+  } as Message;
+  const refreshed = {
+    ...message('m-5', created),
+    attachments: [{ id: 'a-1', file: 'photo.jpg', thumbnail: 'new.webp' }],
+  } as Message;
+  const result = dedupeMessages([previous, refreshed]);
+  assert.equal((result[0].attachments?.[0] as any).thumbnail, 'new.webp');
+});
+
 test('repeated cursor pages walk a 1,000-message history exactly once', () => {
   const created = '2026-01-01T00:00:00.000Z';
   const all = Array.from({ length: 1000 }, (_, index) => message(`m-${String(index).padStart(4, '0')}`, created));
@@ -73,4 +89,22 @@ test('cached pages remain revealable after remote history is exhausted', () => {
   const final = revealCachedMessages(revealed.items, cached, 50, false);
   assert.equal(final.items.length, 120);
   assert.equal(final.hasMore, false);
+});
+
+test('a capped 500-message window detects older movement without a length increase', () => {
+  const all = Array.from({ length: 1000 }, (_, index) =>
+    message(
+      `m-${String(index).padStart(4, '0')}`,
+      new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+    ),
+  );
+  const visible = all.slice(500, 1000);
+  const moved = mergeOlderMessagePage(visible, all.slice(450, 500), 500);
+
+  assert.equal(visible.length, 500);
+  assert.equal(moved.length, 500);
+  assert.equal(visible[0].id, 'm-0500');
+  assert.equal(moved[0].id, 'm-0450');
+  assert.equal(didMessageWindowMoveOlder(visible, moved), true);
+  assert.equal(didMessageWindowMoveOlder(moved, mergeOlderMessagePage(moved, all.slice(450, 500), 500)), false);
 });

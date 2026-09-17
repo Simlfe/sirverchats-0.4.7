@@ -574,11 +574,17 @@ class PocketBaseService {
   // Keep a small record cache so an attachment can be merged locally without
   // issuing a second getOne() request for every upload.
   private messageRecordCache: Map<string, Message> = new Map();
+  private messageRecordCachedAt: Map<string, number> = new Map();
+  private messageReadPromises: Map<string, Promise<Message>> = new Map();
   private serverChannelsCache: Map<string, Channel[]> = new Map();
   private dmChannelsCache: Map<string, Channel[]> = new Map();
   private channelMetaCache: Map<string, { record: any; timestamp: number }> = new Map();
   private serverOwnerCache: Map<string, { owner: string; timestamp: number }> = new Map();
   private memberRoleCache: Map<string, { roles: string[]; timestamp: number }> = new Map();
+  private serverRolesSnapshotCache: Map<string, { items: ServerRole[]; timestamp: number }> = new Map();
+  private serverRolesPromises: Map<string, Promise<ServerRole[]>> = new Map();
+  private serverMembersSnapshotCache: Map<string, { items: ServerMember[]; timestamp: number }> = new Map();
+  private serverMembersPromises: Map<string, Promise<ServerMember[]>> = new Map();
   private activeReadDeadlineAborts: Map<string, (error: any) => void> = new Map();
   private loginCooldownUntil: number = 0;
 
@@ -654,11 +660,15 @@ class PocketBaseService {
   private cacheMessageRecord(message: Message | null | undefined): void {
     if (!message?.id) return;
     this.messageRecordCache.set(message.id, message);
+    this.messageRecordCachedAt.set(message.id, Date.now());
     // Realtime is long-lived; bound this auxiliary cache independently from
     // the conversation history caches so it cannot grow without limit.
     if (this.messageRecordCache.size > 1200) {
       const oldestKey = this.messageRecordCache.keys().next().value;
-      if (oldestKey) this.messageRecordCache.delete(oldestKey);
+      if (oldestKey) {
+        this.messageRecordCache.delete(oldestKey);
+        this.messageRecordCachedAt.delete(oldestKey);
+      }
     }
   }
 
@@ -892,6 +902,7 @@ class PocketBaseService {
   }
 
   async banMember(serverId: string, userId: string): Promise<boolean> {
+    this.serverMembersSnapshotCache.delete(serverId);
     const leftAt = new Date().toISOString();
     localStorage.setItem(`is_member_${serverId}_${userId}`, 'false');
     localStorage.setItem(`membership_status_${serverId}_${userId}`, 'banned');
@@ -1490,6 +1501,7 @@ class PocketBaseService {
   }
 
   async joinServer(serverId: string): Promise<ServerMember> {
+    this.serverMembersSnapshotCache.delete(serverId);
     if (this.isDemo) {
       return { id: 'mock-member-id', server: serverId, user: 'demo-user-id', is_member: true, membership_status: 'active' };
     }
@@ -2151,7 +2163,26 @@ class PocketBaseService {
     }
   }
 
-  async getMessageById(messageId: string): Promise<Message> {
+  async getMessageById(messageId: string, options: { forceRefresh?: boolean } = {}): Promise<Message> {
+    if (!options.forceRefresh) {
+      const cached = this.messageRecordCache.get(messageId);
+      const cachedAt = this.messageRecordCachedAt.get(messageId) || 0;
+      if (cached && Date.now() - cachedAt < 30_000) return cached;
+    }
+    const pending = this.messageReadPromises.get(messageId);
+    if (pending) return pending;
+
+    const request = this.fetchMessageByIdUncached(messageId)
+      .finally(() => {
+        if (this.messageReadPromises.get(messageId) === request) {
+          this.messageReadPromises.delete(messageId);
+        }
+      });
+    this.messageReadPromises.set(messageId, request);
+    return request;
+  }
+
+  private async fetchMessageByIdUncached(messageId: string): Promise<Message> {
     if (this.isDemo) {
       let reactions: any = [];
       try {
@@ -3574,6 +3605,7 @@ class PocketBaseService {
   }
 
   async kickMember(serverId: string, userId: string): Promise<boolean> {
+    this.serverMembersSnapshotCache.delete(serverId);
     const leftAt = new Date().toISOString();
     localStorage.setItem(`is_member_${serverId}_${userId}`, 'false');
     localStorage.setItem(`membership_status_${serverId}_${userId}`, 'kicked');
@@ -4524,7 +4556,29 @@ class PocketBaseService {
 
   // --- SERVER ROLES & MEMBERS ---
 
-  async fetchServerRoles(serverId: string): Promise<ServerRole[]> {
+  async fetchServerRoles(serverId: string, options: { forceRefresh?: boolean } = {}): Promise<ServerRole[]> {
+    if (this.isDemo || !serverId) return [];
+    const cached = this.serverRolesSnapshotCache.get(serverId);
+    if (!options.forceRefresh && cached && Date.now() - cached.timestamp < 30_000) {
+      return cached.items;
+    }
+    const pending = this.serverRolesPromises.get(serverId);
+    if (pending) return pending;
+    const request = this.fetchServerRolesUncached(serverId)
+      .then((items) => {
+        this.serverRolesSnapshotCache.set(serverId, { items, timestamp: Date.now() });
+        return items;
+      })
+      .finally(() => {
+        if (this.serverRolesPromises.get(serverId) === request) {
+          this.serverRolesPromises.delete(serverId);
+        }
+      });
+    this.serverRolesPromises.set(serverId, request);
+    return request;
+  }
+
+  private async fetchServerRolesUncached(serverId: string): Promise<ServerRole[]> {
     if (this.isDemo || !serverId) return [];
 
     let storedLocal: ServerRole[] = [];
@@ -4652,7 +4706,8 @@ class PocketBaseService {
       }
     }
 
-    const current = await this.fetchServerRoles(serverId);
+    this.serverRolesSnapshotCache.delete(serverId);
+    const current = await this.fetchServerRoles(serverId, { forceRefresh: true });
     return current.find((r) => r.id === newRole.id || r.name === newRole.name) || newRole;
   }
 
@@ -4726,7 +4781,8 @@ class PocketBaseService {
       }
     }
 
-    const current = await this.fetchServerRoles(serverId);
+    this.serverRolesSnapshotCache.delete(serverId);
+    const current = await this.fetchServerRoles(serverId, { forceRefresh: true });
     return current.find((r) => r.id === roleId || r.name === roleData.name) || updatedRoleMerged;
   }
 
@@ -4738,7 +4794,8 @@ class PocketBaseService {
     }
 
     try {
-      const current = await this.fetchServerRoles(serverId);
+      this.serverRolesSnapshotCache.delete(serverId);
+      const current = await this.fetchServerRoles(serverId, { forceRefresh: true });
       const updated = current.filter((r) => r.id !== roleId);
       localStorage.setItem(`server_roles_${serverId}`, JSON.stringify(updated));
     } catch (err) {}
@@ -4827,7 +4884,29 @@ class PocketBaseService {
     }
   }
 
-  async fetchServerMembers(serverId: string): Promise<ServerMember[]> {
+  async fetchServerMembers(serverId: string, options: { forceRefresh?: boolean } = {}): Promise<ServerMember[]> {
+    if (this.isDemo || !serverId) return [];
+    const cached = this.serverMembersSnapshotCache.get(serverId);
+    if (!options.forceRefresh && cached && Date.now() - cached.timestamp < 15_000) {
+      return cached.items;
+    }
+    const pending = this.serverMembersPromises.get(serverId);
+    if (pending) return pending;
+    const request = this.fetchServerMembersUncached(serverId)
+      .then((items) => {
+        this.serverMembersSnapshotCache.set(serverId, { items, timestamp: Date.now() });
+        return items;
+      })
+      .finally(() => {
+        if (this.serverMembersPromises.get(serverId) === request) {
+          this.serverMembersPromises.delete(serverId);
+        }
+      });
+    this.serverMembersPromises.set(serverId, request);
+    return request;
+  }
+
+  private async fetchServerMembersUncached(serverId: string): Promise<ServerMember[]> {
     if (this.isDemo) return [];
     try {
       const records = await this.pb.collection('server_members').getFullList({
@@ -4915,6 +4994,7 @@ class PocketBaseService {
   }
 
   async updateMemberRole(serverId: string, memberIdOrUserId: string, roleIdOrName: string): Promise<boolean> {
+    this.serverMembersSnapshotCache.delete(serverId);
     let serverRoles: ServerRole[] = [];
     try {
       serverRoles = await this.fetchServerRoles(serverId);
@@ -5009,6 +5089,7 @@ class PocketBaseService {
     userId: string,
     profileData: { member_name?: string; server_avatar?: File | string | null; server_banner?: File | string | null; server_profile_settings?: any }
   ): Promise<ServerMember> {
+    this.serverMembersSnapshotCache.delete(serverId);
     if (this.isDemo) {
       return { id: 'demo-member', server: serverId, user: userId, ...profileData } as any;
     }
@@ -5394,6 +5475,7 @@ class PocketBaseService {
   }
 
   async kickServerMember(serverId: string, targetUserId: string): Promise<boolean> {
+    this.serverMembersSnapshotCache.delete(serverId);
     if (!serverId || !targetUserId) return false;
 
     if (!this.isDemo) {

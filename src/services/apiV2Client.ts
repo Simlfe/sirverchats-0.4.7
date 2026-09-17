@@ -8,6 +8,10 @@ export interface DmSummary {
   counterpart: User;
 }
 
+export interface DmSummaryEnvelope {
+  items: DmSummary[];
+}
+
 export interface BootstrapResponse {
   user: User;
   servers: Server[];
@@ -119,8 +123,19 @@ export class ApiV2Client {
     })}`, {}, { timeoutMs: 15000 });
   }
 
-  dms(): Promise<DmSummary[]> {
-    return this.request<DmSummary[]>('/dms', {}, { timeoutMs: 15000 });
+  async dms(): Promise<DmSummary[]> {
+    const response = await this.request<DmSummary[] | DmSummaryEnvelope>(
+      '/dms',
+      {},
+      { timeoutMs: 15000 },
+    );
+    const items = Array.isArray(response) ? response : response?.items;
+    if (!Array.isArray(items)) {
+      const error = new Error('Gateway returned an invalid DM summary envelope') as BackendError;
+      error.code = 'INVALID_GATEWAY_RESPONSE';
+      throw error;
+    }
+    return items;
   }
 
   health(): Promise<{ status: string }> {

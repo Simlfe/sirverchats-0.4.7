@@ -1,13 +1,88 @@
 import { Message } from '../types';
 import { parseReactions } from '../components/MessageReactions';
 
+function profileRevision(message: Message): string {
+  const sender = message.expand?.sender ||
+    ((message as any).sender && typeof (message as any).sender === 'object'
+      ? (message as any).sender
+      : null);
+  if (!sender) return '';
+  return JSON.stringify([
+    sender.id,
+    sender.username,
+    sender.display_name,
+    sender.avatar,
+    sender.avatar_processed,
+    sender.profile_frame,
+    sender.role,
+    sender.updated,
+  ]);
+}
+
+function replyRevision(message: Message): string {
+  const reply = message.expand?.reply_to ||
+    ((message as any).reply && typeof (message as any).reply === 'object'
+      ? (message as any).reply
+      : null);
+  if (!reply) return String(message.reply_to || '');
+  return JSON.stringify([
+    reply.id,
+    reply.sender,
+    reply.content,
+    reply.edited,
+    reply.deleted,
+    reply.deleted_at,
+    reply.updated,
+    profileRevision(reply),
+  ]);
+}
+
+function attachmentRevision(message: Message): string {
+  const attachments = ((message as any).attachments ||
+    message.expand?.['attachments(message)'] ||
+    message.expand?.attachments_via_message ||
+    message.expand?.['private_attachments(message)'] ||
+    message.expand?.private_attachments ||
+    message.expand?.attachments ||
+    []) as any[];
+  return JSON.stringify(attachments.map((attachment) => {
+    if (typeof attachment === 'string') return attachment;
+    return [
+      attachment?.id,
+      attachment?.file,
+      attachment?.thumbnail,
+      attachment?.thumbnail_width,
+      attachment?.thumbnail_height,
+      attachment?.thumbnail_mime,
+      attachment?.thumbnail_size,
+      attachment?.url,
+      attachment?.width,
+      attachment?.height,
+      attachment?.duration,
+      attachment?.size,
+      attachment?.type,
+      attachment?.is_spoiler,
+      attachment?.updated,
+    ];
+  }));
+}
+
 export function isSingleMessageEqual(p: Message, n: Message): boolean {
   if (p === n) return true;
   if (p.id !== n.id) return false;
+  if (p.sender !== n.sender) return false;
+  if (p.channel !== n.channel) return false;
   if (p.content !== n.content) return false;
   if (p.pinned !== n.pinned) return false;
   if (p.deleted !== n.deleted) return false;
   if (p.deleted_at !== n.deleted_at) return false;
+  if (p.reply_to !== n.reply_to) return false;
+  if (p.edited !== n.edited) return false;
+  if (p.edited_at !== n.edited_at) return false;
+  if (p.updated !== n.updated) return false;
+  if (p.has_attachment !== n.has_attachment) return false;
+  if (p.is_spoiler !== n.is_spoiler) return false;
+  if (p.is_pending !== n.is_pending) return false;
 
   // Compare reactions using normalized parser
   const pReactionsRaw = (p as any).reactions ?? p.expand?.reactions ?? (p as any).reactions_list ?? (p as any).message_reactions;
@@ -20,10 +95,9 @@ export function isSingleMessageEqual(p: Message, n: Message): boolean {
     }
   }
 
-  // Compare attachments count
-  const pAtts = ((p as any).attachments || p.expand?.['attachments(message)'] || []) as any[];
-  const nAtts = ((n as any).attachments || n.expand?.['attachments(message)'] || []) as any[];
-  if (pAtts.length !== nAtts.length) return false;
+  if (profileRevision(p) !== profileRevision(n)) return false;
+  if (replyRevision(p) !== replyRevision(n)) return false;
+  if (attachmentRevision(p) !== attachmentRevision(n)) return false;
 
   return true;
 }

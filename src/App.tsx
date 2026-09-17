@@ -50,7 +50,7 @@ import useRealtimeMedia from './context/MediaContext';
 import { realtimeMediaProvider } from './media/RealtimeMediaProvider';
 import voicePresenceStore from './services/voicePresenceStore';
 import { readSessionSnapshot, writeSessionSnapshot } from './services/sessionSnapshot';
-import { cursorFromMessage, dedupeMessages, mergeMessagePage, mergeOlderMessagePage, revealCachedOlderMessages, INITIAL_MESSAGE_PAGE_SIZE, OLDER_MESSAGE_PAGE_SIZE, MAX_ACTIVE_MESSAGES } from './services/messagePagination';
+import { cursorFromMessage, dedupeMessages, didMessageWindowMoveOlder, mergeMessagePage, mergeOlderMessagePage, INITIAL_MESSAGE_PAGE_SIZE, OLDER_MESSAGE_PAGE_SIZE, MAX_ACTIVE_MESSAGES } from './services/messagePagination';
 import { backendAvailability, BackendAvailability, isClientCancellation } from './services/backendAvailability';
 import { afterFirstPaint } from './services/afterPaint';
 import { apiV2Client, BootstrapResponse } from './services/apiV2Client';
@@ -471,7 +471,8 @@ export default function App() {
   const gatewayBootstrapRef = useRef<BootstrapResponse | null>(null);
   const gatewayBootstrapPromiseRef = useRef<Promise<BootstrapResponse | null> | null>(null);
   const gatewayBootstrapUserRef = useRef<string | null>(null);
-  const gatewayBootstrapAttemptedRef = useRef(false);
+  const gatewayBootstrapStateRef = useRef<'idle' | 'loading' | 'success' | 'retryable-failure'>('idle');
+  const gatewayBootstrapFailureAtRef = useRef(0);
   const gatewayBootstrapEnabled = String((import.meta as any).env?.VITE_ENABLE_API_V2_BOOTSTRAP || '').toLowerCase() === 'true';
 
   // Refs for tracking changes without triggering re-renders in effects
@@ -505,8 +506,8 @@ export default function App() {
    * Optional v2 bootstrap. It is opt-in until the gateway is deployed on the
    * home VPS; when enabled, servers/channels/DM summaries share one
    * authenticated request and the legacy reads below are skipped. A failed
-   * bootstrap is remembered for this session so an unavailable tunnel cannot
-   * trigger repeated fallback waterfalls.
+   * callers share one in-flight promise. Failures enter a short retryable
+   * cooldown rather than permanently disabling bootstrap until logout.
    */
   const ensureGatewayBootstrap = async (): Promise<BootstrapResponse | null> => {
     const userId = currentUser?.id;
@@ -515,13 +516,17 @@ export default function App() {
       gatewayBootstrapUserRef.current = userId;
       gatewayBootstrapRef.current = null;
       gatewayBootstrapPromiseRef.current = null;
-      gatewayBootstrapAttemptedRef.current = false;
+      gatewayBootstrapStateRef.current = 'idle';
+      gatewayBootstrapFailureAtRef.current = 0;
     }
     if (gatewayBootstrapRef.current) return gatewayBootstrapRef.current;
-    if (gatewayBootstrapAttemptedRef.current) return null;
     if (gatewayBootstrapPromiseRef.current) return gatewayBootstrapPromiseRef.current;
+    if (
+      gatewayBootstrapStateRef.current === 'retryable-failure' &&
+      Date.now() - gatewayBootstrapFailureAtRef.current < 5000
+    ) return null;
 
-    gatewayBootstrapAttemptedRef.current = true;
+    gatewayBootstrapStateRef.current = 'loading';
     apiV2Client.setTokenProvider(() => {
       try {
         return pbService.getPbInstance().authStore.token || null;
@@ -533,11 +538,18 @@ export default function App() {
       .then((bootstrap) => {
         if (bootstrap?.user?.id && bootstrap.user.id === userId) {
           gatewayBootstrapRef.current = bootstrap;
+          gatewayBootstrapStateRef.current = 'success';
           return bootstrap;
         }
+        gatewayBootstrapStateRef.current = 'retryable-failure';
+        gatewayBootstrapFailureAtRef.current = Date.now();
         return null;
       })
-      .catch(() => null)
+      .catch(() => {
+        gatewayBootstrapStateRef.current = 'retryable-failure';
+        gatewayBootstrapFailureAtRef.current = Date.now();
+        return null;
+      })
       .finally(() => {
         if (gatewayBootstrapPromiseRef.current === request) {
           gatewayBootstrapPromiseRef.current = null;
@@ -2387,8 +2399,6 @@ export default function App() {
           oldestCursor: cursorFromMessage(mergedItems[0]),
         };
         messagesCache.current[channelId] = nextEntry;
-        await offlineCacheService.mergeChannelMessages(channelId, gatewayPage.items, gatewayPage.hasMore, append ? pageNum : 1);
-        await offlineCacheService.saveMessagePage(gatewayKind, channelId, gatewayPage, cursor);
         if (activeChannelRef.current?.id === channelId && requestIsCurrent()) {
           setMessages((prev) => append
             ? mergeOlderMessagePage(prev, gatewayPage.items, MAX_ACTIVE_MESSAGES)
@@ -2396,6 +2406,13 @@ export default function App() {
           setHasMoreMessages(gatewayPage.hasMore);
           setMessagesPage(append ? pageNum : 1);
         }
+        offlineCacheService.enqueueMessagePersistence(
+          gatewayKind,
+          channelId,
+          gatewayPage,
+          cursor,
+          append ? pageNum : 1,
+        );
       } catch (error) {
         console.warn(`Gateway ${gatewayKind} message read failed:`, error);
       } finally {
@@ -2459,9 +2476,7 @@ export default function App() {
         const mergedItems = append
           ? mergeOlderMessagePage(existing, page.items, MAX_ACTIVE_MESSAGES)
           : mergeMessagePage(existing, page.items, MAX_ACTIVE_MESSAGES);
-        const remoteHasMore = page.items.length === 0 && append
-          ? (cachedEntry?.remoteHasMore ?? true)
-          : page.hasMore;
+        const remoteHasMore = page.hasMore;
         const nextEntry = {
           items: mergedItems,
           page: pageNum,
@@ -2472,9 +2487,6 @@ export default function App() {
           oldestCursor: cursorFromMessage(mergedItems[0]),
         };
         messagesCache.current[channelId] = nextEntry;
-        await offlineCacheService.mergeChannelMessages(channelId, page.items, page.hasMore, pageNum);
-        await offlineCacheService.saveMessagePage('dm', channelId, page, cursor);
-
         if (activeChannelRef.current?.id === channelId && requestIsCurrent()) {
           setMessages((prev) => append
             ? mergeOlderMessagePage(prev, page.items, MAX_ACTIVE_MESSAGES)
@@ -2482,6 +2494,7 @@ export default function App() {
           setHasMoreMessages(remoteHasMore);
           setMessagesPage(pageNum);
         }
+        offlineCacheService.enqueueMessagePersistence('dm', channelId, page, cursor, pageNum);
 
         if ((import.meta as any).env?.DEV) {
           console.log(`[PAGINATION_DEBUG] DM Channel: ${channelId} | cursor=${cursor ? `${cursor.created}/${cursor.id}` : 'initial'} | returned=${page.items.length} | hasMore=${page.hasMore}`);
@@ -2505,9 +2518,7 @@ export default function App() {
               const mergedItems = append
                 ? mergeOlderMessagePage(existing, retryPage.items, MAX_ACTIVE_MESSAGES)
                 : mergeMessagePage(existing, retryPage.items, MAX_ACTIVE_MESSAGES);
-              const remoteHasMore = retryPage.items.length === 0 && append
-                ? (cachedEntry?.remoteHasMore ?? true)
-                : retryPage.hasMore;
+              const remoteHasMore = retryPage.hasMore;
               const nextEntry = {
                 items: mergedItems,
                 page: pageNum,
@@ -2518,8 +2529,6 @@ export default function App() {
                 oldestCursor: cursorFromMessage(mergedItems[0]),
               };
               messagesCache.current[channelId] = nextEntry;
-              await offlineCacheService.mergeChannelMessages(channelId, retryPage.items, retryPage.hasMore, pageNum);
-              await offlineCacheService.saveMessagePage('dm', channelId, retryPage, cursor);
               if (activeChannelRef.current?.id === channelId && requestIsCurrent()) {
                 setMessages((prev) => append
                   ? mergeOlderMessagePage(prev, retryPage.items, MAX_ACTIVE_MESSAGES)
@@ -2527,6 +2536,7 @@ export default function App() {
                 setHasMoreMessages(remoteHasMore);
                 setMessagesPage(pageNum);
               }
+              offlineCacheService.enqueueMessagePersistence('dm', channelId, retryPage, cursor, pageNum);
               return;
             } catch (retryErr) {
               if (!isClientCancellation(retryErr)) {
@@ -2564,9 +2574,7 @@ export default function App() {
         if (!requestIsCurrent()) return;
 
         const mergedItems = mergeOlderMessagePage(currentDataset, page.items, MAX_ACTIVE_MESSAGES);
-        const remoteHasMore = page.items.length === 0
-          ? (currentEntry?.remoteHasMore ?? true)
-          : page.hasMore;
+        const remoteHasMore = page.hasMore;
         messagesCache.current[channelId] = {
           items: mergedItems,
           page: pageNum,
@@ -2576,13 +2584,11 @@ export default function App() {
           newestCursor: cursorFromMessage(mergedItems[mergedItems.length - 1]),
           oldestCursor: cursorFromMessage(mergedItems[0]),
         };
-        await offlineCacheService.mergeChannelMessages(channelId, page.items, page.hasMore, pageNum);
-        await offlineCacheService.saveMessagePage('channel', channelId, page, oldestCursor);
-
         if (activeChannelRef.current?.id === channelId) {
           setMessages((prev) => mergeOlderMessagePage(prev, page.items, MAX_ACTIVE_MESSAGES));
           setHasMoreMessages(remoteHasMore);
         }
+        offlineCacheService.enqueueMessagePersistence('channel', channelId, page, oldestCursor, pageNum);
         if ((import.meta as any).env?.DEV) {
           console.log(`[PAGINATION_DEBUG] Appending channel cursor=${oldestCursor ? `${oldestCursor.created}/${oldestCursor.id}` : 'initial'} returned=${page.items.length} hasMore=${page.hasMore}`);
         }
@@ -2614,13 +2620,17 @@ export default function App() {
           oldestCursor: cursorFromMessage(mergedItems[0]),
         };
         messagesCache.current[channelId] = nextEntry;
-        await offlineCacheService.mergeChannelMessages(channelId, itemsToSet, page.hasMore, 1);
-        await offlineCacheService.saveMessagePage('channel', channelId, page, null);
-
         if (activeChannelRef.current?.id === channelId) {
           setMessages((prev) => mergeMessagePage(prev, itemsToSet, MAX_ACTIVE_MESSAGES));
           setHasMoreMessages(page.hasMore);
         }
+        offlineCacheService.enqueueMessagePersistence(
+          'channel',
+          channelId,
+          { ...page, items: itemsToSet },
+          null,
+          1,
+        );
 
         if ((import.meta as any).env?.DEV) {
           console.log(`[PAGINATION_DEBUG] Initial channel page returned=${page.items.length} hasMore=${page.hasMore}`);
@@ -2642,9 +2652,7 @@ export default function App() {
               if (!requestIsCurrent()) return;
 
               const mergedItems = mergeOlderMessagePage(currentDataset, retryPage.items, MAX_ACTIVE_MESSAGES);
-              const remoteHasMore = retryPage.items.length === 0
-                ? (currentEntry?.remoteHasMore ?? true)
-                : retryPage.hasMore;
+              const remoteHasMore = retryPage.hasMore;
               messagesCache.current[channelId] = {
                 items: mergedItems,
                 page: pageNum,
@@ -2654,14 +2662,12 @@ export default function App() {
                 newestCursor: cursorFromMessage(mergedItems[mergedItems.length - 1]),
                 oldestCursor: cursorFromMessage(mergedItems[0]),
               };
-              await offlineCacheService.mergeChannelMessages(channelId, retryPage.items, retryPage.hasMore, pageNum);
-              await offlineCacheService.saveMessagePage('channel', channelId, retryPage, oldestCursor);
-
               if (activeChannelRef.current?.id === channelId) {
                 setMessages((prev) => mergeOlderMessagePage(prev, retryPage.items, MAX_ACTIVE_MESSAGES));
                 setHasMoreMessages(remoteHasMore);
                 setMessagesPage(pageNum);
               }
+              offlineCacheService.enqueueMessagePersistence('channel', channelId, retryPage, oldestCursor, pageNum);
               return;
             } else {
               const retryPage = await pbService.fetchMessagesPage(channelId, null, requestLimit, { timeoutMs: 20000 });
@@ -2689,14 +2695,18 @@ export default function App() {
                 oldestCursor: cursorFromMessage(mergedItems[0]),
               };
               messagesCache.current[channelId] = nextEntry;
-              await offlineCacheService.mergeChannelMessages(channelId, itemsToSet, retryPage.hasMore, 1);
-              await offlineCacheService.saveMessagePage('channel', channelId, retryPage, null);
-
               if (activeChannelRef.current?.id === channelId) {
                 setMessages((prev) => mergeMessagePage(prev, itemsToSet, MAX_ACTIVE_MESSAGES));
                 setHasMoreMessages(retryPage.hasMore);
                 setMessagesPage(pageNum);
               }
+              offlineCacheService.enqueueMessagePersistence(
+                'channel',
+                channelId,
+                { ...retryPage, items: itemsToSet },
+                null,
+                1,
+              );
               return;
             }
           } catch (retryErr) {
@@ -2728,49 +2738,52 @@ export default function App() {
       const isDm = activeChannel.server === 'dm' || activeChannel.name.startsWith('@');
       const kind = isDm ? 'dm' : 'channel';
 
-      // Reveal persisted pages before touching the network. This also works
-      // when the last remote response reported hasMore=false: cached pages
-      // and remote exhaustion are intentionally independent states.
-      const storedPages = await offlineCacheService.listMessagePages(kind, conversationId);
       const persistedMetadata = await offlineCacheService.getMessageMetadata(kind, conversationId);
       const knownRemoteHasMore = entry?.remoteHasMore ?? persistedMetadata?.remoteHasMore;
-      const cachedItems = dedupeMessages([
-        ...(entry?.items || []),
-        ...storedPages.flatMap((page) => page.items || []),
-      ]);
-      if (cachedItems.length > messages.length) {
-        const revealed = revealCachedOlderMessages(
+      const visibleOldest = messages.find((message) => !message.id.startsWith('optimistic-'));
+      const visibleOldestCursor = cursorFromMessage(visibleOldest);
+      const cachedPage = await offlineCacheService.getNextOlderMessagePage(
+        kind,
+        conversationId,
+        visibleOldestCursor,
+      );
+      if (activeChannelRef.current?.id !== conversationId) return;
+
+      if (cachedPage?.items?.length) {
+        const revealedItems = mergeOlderMessagePage(
           messages,
-          cachedItems,
-          OLDER_MESSAGE_PAGE_SIZE,
-          knownRemoteHasMore !== false,
+          cachedPage.items,
+          MAX_ACTIVE_MESSAGES,
         );
-        // A persisted page can contain only rows that are already visible
-        // (for example after an optimistic/realtime merge). In that case keep
-        // the network path below instead of looping on the same cache.
-        if (revealed.items.length > messages.length) {
-          setMessages(revealed.items);
-          setHasMoreMessages(revealed.hasMore);
+        // At the 500-row cap a valid prepend replaces equally many rows from
+        // the newest edge. Detect movement by the oldest message, not length.
+        if (didMessageWindowMoveOlder(messages, revealedItems)) {
+          const cachedHasMore = cachedPage.hasMore || knownRemoteHasMore !== false;
+          setMessages(revealedItems);
+          setHasMoreMessages(cachedHasMore);
           const revealedEntry = entry || {
             items: [],
             page: messagesPage,
             hasMore: knownRemoteHasMore !== false,
             remoteHasMore: knownRemoteHasMore,
             cachedPagesAvailable: 0,
-            newestCursor: cursorFromMessage(revealed.items[revealed.items.length - 1]),
-            oldestCursor: cursorFromMessage(revealed.items[0]),
+            newestCursor: cursorFromMessage(revealedItems[revealedItems.length - 1]),
+            oldestCursor: cursorFromMessage(revealedItems[0]),
           };
-          revealedEntry.items = revealed.items;
-          revealedEntry.hasMore = revealed.hasMore;
-          revealedEntry.cachedPagesAvailable = Math.max(revealedEntry.cachedPagesAvailable || 0, storedPages.length);
-          revealedEntry.newestCursor = cursorFromMessage(revealed.items[revealed.items.length - 1]);
-          revealedEntry.oldestCursor = cursorFromMessage(revealed.items[0]);
+          revealedEntry.items = revealedItems;
+          revealedEntry.hasMore = cachedHasMore;
+          revealedEntry.cachedPagesAvailable = Math.max(
+            0,
+            (revealedEntry.cachedPagesAvailable || persistedMetadata?.cachedPagesAvailable || 1) - 1,
+          );
+          revealedEntry.newestCursor = cursorFromMessage(revealedItems[revealedItems.length - 1]);
+          revealedEntry.oldestCursor = cursorFromMessage(revealedItems[0]);
           messagesCache.current[conversationId] = revealedEntry;
           return;
         }
       }
 
-      if (knownRemoteHasMore === false || (entry && entry.hasMore === false && storedPages.length === 0)) {
+      if (knownRemoteHasMore === false || entry?.remoteHasMore === false) {
         setHasMoreMessages(false);
         return;
       }
@@ -3061,7 +3074,7 @@ export default function App() {
         // Swap optimistic echo out for real database record
         let finalMsg = msg;
         try {
-          finalMsg = await pbService.getMessageById(msg.id);
+          finalMsg = await pbService.getMessageById(msg.id, { forceRefresh: true });
         } catch (e) {
           finalMsg = msg;
         }
@@ -4139,7 +4152,8 @@ export default function App() {
 
   const retryBackendReads = useCallback(() => {
     backendAvailability.reset();
-    gatewayBootstrapAttemptedRef.current = false;
+    gatewayBootstrapStateRef.current = 'idle';
+    gatewayBootstrapFailureAtRef.current = 0;
     gatewayBootstrapRef.current = null;
     if (currentUser?.id) {
       void loadServers();

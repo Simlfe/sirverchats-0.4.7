@@ -1,6 +1,6 @@
 import { Server, Channel, Message, ConversationKind, MessageCursor, MessagePage } from '../types';
 import { MessageDeletionService } from './messageDeletionService';
-import { cursorKey, dedupeMessages, MAX_ACTIVE_MESSAGES } from './messagePagination';
+import { compareMessageOrder, cursorKey, dedupeMessages, MAX_ACTIVE_MESSAGES } from './messagePagination';
 
 const DB_NAME = 'SirverOfflineCacheDB';
 const DB_VERSION = 2;
@@ -45,6 +45,8 @@ class OfflineCacheService {
   private memMessages: Map<string, { items: Message[]; hasMore: boolean; page: number; lastSyncTime: number }> = new Map();
   private memMessagePages: Map<string, CachedMessagePage> = new Map();
   private memMessageMetadata: Map<string, MessageCacheMetadata> = new Map();
+  private fullyHydratedPageConversations: Set<string> = new Set();
+  private messagePersistenceQueues: Map<string, Promise<void>> = new Map();
 
   private getDB(): Promise<IDBDatabase> {
     if (this.dbPromise) return this.dbPromise;
@@ -343,11 +345,13 @@ class OfflineCacheService {
     try {
       const db = await this.getDB();
       await new Promise<void>((resolve) => {
-        const req = db.transaction(STORES.MESSAGE_METADATA, 'readwrite')
-          .objectStore(STORES.MESSAGE_METADATA)
-          .put({ ...metadata, key });
-        req.onsuccess = () => resolve();
-        req.onerror = () => resolve();
+        const tx = db.transaction(STORES.MESSAGE_METADATA, 'readwrite');
+        tx.objectStore(STORES.MESSAGE_METADATA).put({ ...metadata, key });
+        // Request success only means the write was queued. Transaction
+        // completion is the durable IndexedDB boundary.
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => resolve();
+        tx.onerror = () => resolve();
       });
     } catch {
       // IndexedDB is an enhancement; the in-memory cache remains usable.
@@ -378,6 +382,42 @@ class OfflineCacheService {
     }
   }
 
+  /**
+   * Read the exact cached page that follows the visible oldest cursor. Pages
+   * are keyed by their request cursor, so this remains O(1) as cached history
+   * grows and avoids flattening/sorting every page on each scroll gesture.
+   */
+  async getNextOlderMessagePage(
+    kind: ConversationKind,
+    conversationId: string,
+    before: MessageCursor | null,
+  ): Promise<CachedMessagePage | null> {
+    if (!before) return null;
+    const exact = await this.getMessagePage(kind, conversationId, before);
+    if (exact) return exact;
+
+    // A realtime insertion can move a capped window's oldest row by one, so
+    // its exact request cursor may no longer match a stored page key. This is
+    // a compatibility fallback; the full page set is hydrated once and then
+    // retained in memory, while ordinary pagination stays on the exact O(1)
+    // lookup above.
+    const pages = await this.listMessagePages(kind, conversationId);
+    let closest: CachedMessagePage | null = null;
+    let closestNewest: Message | null = null;
+    for (const page of pages) {
+      const olderItems = page.items
+        .filter((message) => compareMessageOrder(message, before) < 0)
+        .sort(compareMessageOrder);
+      const newestOlder = olderItems[olderItems.length - 1];
+      if (!newestOlder) continue;
+      if (!closestNewest || compareMessageOrder(newestOlder, closestNewest) > 0) {
+        closestNewest = newestOlder;
+        closest = { ...page, items: olderItems };
+      }
+    }
+    return closest;
+  }
+
   async saveMessagePage(
     kind: ConversationKind,
     conversationId: string,
@@ -405,31 +445,76 @@ class OfflineCacheService {
       newestCursor: previous?.newestCursor || (record.items.length ? { created: record.items[record.items.length - 1].created || '', id: record.items[record.items.length - 1].id } : null),
       oldestCursor: record.nextCursor || previous?.oldestCursor || (record.items.length ? { created: record.items[0].created || '', id: record.items[0].id } : null),
       cachedPagesAvailable: Math.max(1, (previous?.cachedPagesAvailable || 0) + (alreadyStored ? 0 : 1)),
-      // An empty response is not evidence that remote history is exhausted.
-      remoteHasMore: record.items.length === 0 ? (previous?.remoteHasMore ?? true) : page.hasMore,
+      // This method is called only after a successful page response. A valid
+      // empty final page is authoritative and must stop retry loops.
+      remoteHasMore: page.hasMore,
       updatedAt: Date.now(),
     };
-    await Promise.all([
-      this.saveMessageMetadata(nextMetadata),
-      (async () => {
-        try {
-          const db = await this.getDB();
-          await new Promise<void>((resolve) => {
-            const req = db.transaction(STORES.MESSAGE_PAGES, 'readwrite').objectStore(STORES.MESSAGE_PAGES).put(record);
-            req.onsuccess = () => resolve();
-            req.onerror = () => resolve();
-          });
-        } catch {
-          // Ignore storage quota/availability failures.
+    this.memMessageMetadata.set(this.messageMetadataKey(kind, conversationId), nextMetadata);
+    try {
+      const db = await this.getDB();
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction(
+          [STORES.MESSAGE_PAGES, STORES.MESSAGE_METADATA],
+          'readwrite',
+        );
+        tx.objectStore(STORES.MESSAGE_PAGES).put(record);
+        tx.objectStore(STORES.MESSAGE_METADATA).put({
+          ...nextMetadata,
+          key: this.messageMetadataKey(kind, conversationId),
+        });
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    } catch {
+      // IndexedDB is an enhancement; the in-memory cache remains usable.
+    }
+  }
+
+  /**
+   * Persist a successful page after React and the memory cache have already
+   * been updated. Writes are serialized per conversation so rapid refresh and
+   * pagination results cannot commit metadata out of order.
+   */
+  enqueueMessagePersistence(
+    kind: ConversationKind,
+    conversationId: string,
+    page: MessagePage<Message>,
+    cursor: MessageCursor | null,
+    pageNumber: number,
+  ): void {
+    const queueKey = this.messageMetadataKey(kind, conversationId);
+    const previous = this.messagePersistenceQueues.get(queueKey) || Promise.resolve();
+    const task = previous
+      .catch(() => undefined)
+      .then(async () => {
+        await this.mergeChannelMessages(
+          conversationId,
+          page.items,
+          page.hasMore,
+          pageNumber,
+        );
+        await this.saveMessagePage(kind, conversationId, page, cursor);
+      })
+      .catch((error) => {
+        console.warn(`Failed to persist cached ${kind} message page:`, error);
+      })
+      .finally(() => {
+        if (this.messagePersistenceQueues.get(queueKey) === task) {
+          this.messagePersistenceQueues.delete(queueKey);
         }
-      })(),
-    ]);
+      });
+    this.messagePersistenceQueues.set(queueKey, task);
   }
 
   async listMessagePages(kind: ConversationKind, conversationId: string): Promise<CachedMessagePage[]> {
     const prefix = `${this.messageMetadataKey(kind, conversationId)}:`;
     const fromMemory = Array.from(this.memMessagePages.values()).filter((page) => page.key.startsWith(prefix));
-    if (fromMemory.length > 0) return fromMemory.sort((a, b) => a.savedAt - b.savedAt);
+    const hydrationKey = this.messageMetadataKey(kind, conversationId);
+    if (this.fullyHydratedPageConversations.has(hydrationKey)) {
+      return fromMemory.sort((a, b) => a.savedAt - b.savedAt);
+    }
     try {
       const db = await this.getDB();
       return await new Promise((resolve) => {
@@ -438,7 +523,11 @@ class OfflineCacheService {
         req.onsuccess = () => {
           const rows = (req.result || []) as CachedMessagePage[];
           rows.forEach((row) => this.memMessagePages.set(row.key, row));
-          resolve(rows.sort((a, b) => a.savedAt - b.savedAt));
+          this.fullyHydratedPageConversations.add(hydrationKey);
+          const complete = Array.from(this.memMessagePages.values())
+            .filter((page) => page.key.startsWith(prefix))
+            .sort((a, b) => a.savedAt - b.savedAt);
+          resolve(complete);
         };
         req.onerror = () => resolve([]);
       });
@@ -590,11 +679,7 @@ class OfflineCacheService {
     // Sort strictly by created timestamp ascending
     const mergedList = dedupeMessages(Array.from(existingMap.values()));
 
-    // A failed/empty page must never turn a populated cache into an exhausted
-    // history. Only a non-empty page is authoritative for the remote cursor.
-    const finalHasMore = incoming.length === 0 && hasMore === false
-      ? cached.hasMore
-      : hasMore !== undefined ? hasMore : cached.hasMore;
+    const finalHasMore = hasMore !== undefined ? hasMore : cached.hasMore;
     const finalPage = page !== undefined ? Math.max(page, cached.page) : cached.page;
 
     this.saveCachedMessages(channelId, mergedList, finalHasMore, finalPage);
@@ -666,9 +751,7 @@ class OfflineCacheService {
 
     const mergedList = dedupeMessages(Array.from(existingMap.values()));
 
-    const finalHasMore = incoming.length === 0 && hasMore === false
-      ? cached.hasMore
-      : hasMore !== undefined ? hasMore : cached.hasMore;
+    const finalHasMore = hasMore !== undefined ? hasMore : cached.hasMore;
     const finalPage = page !== undefined ? Math.max(page, cached.page) : cached.page;
 
     this.saveCachedMessages(channelId, mergedList, finalHasMore, finalPage);
@@ -743,6 +826,8 @@ class OfflineCacheService {
       this.memMessages.clear();
       this.memMessagePages.clear();
       this.memMessageMetadata.clear();
+      this.fullyHydratedPageConversations.clear();
+      this.messagePersistenceQueues.clear();
     } catch (e) {
       console.warn('Failed to clear user cache in IndexedDB:', e);
     }

@@ -31,6 +31,38 @@ function relationRichness(value: unknown): number {
     .filter((field) => field !== undefined && field !== null && field !== '').length;
 }
 
+function mergeRelationRevision(message: Message | undefined): string {
+  if (!message) return '';
+  const sender = message.expand?.sender ||
+    ((message as any).sender && typeof (message as any).sender === 'object'
+      ? (message as any).sender
+      : null);
+  const reply = message.expand?.reply_to || null;
+  const attachments = ((message as any).attachments ||
+    message.expand?.['attachments(message)'] ||
+    message.expand?.attachments_via_message ||
+    message.expand?.['private_attachments(message)'] ||
+    message.expand?.private_attachments ||
+    []) as any[];
+  return JSON.stringify({
+    sender: sender ? [sender.id, sender.username, sender.display_name, sender.avatar, sender.updated] : null,
+    reply: reply ? [reply.id, reply.content, reply.updated, reply.deleted, reply.deleted_at] : null,
+    attachments: attachments.map((attachment) => typeof attachment === 'string'
+      ? attachment
+      : [
+          attachment?.id,
+          attachment?.file,
+          attachment?.thumbnail,
+          attachment?.thumbnail_width,
+          attachment?.thumbnail_height,
+          attachment?.thumbnail_mime,
+          attachment?.thumbnail_size,
+          attachment?.url,
+          attachment?.updated,
+        ]),
+  });
+}
+
 /** Sort ascending for the React feed and remove duplicate optimistic/real ids. */
 export function dedupeMessages(messages: Message[], maxItems?: number): Message[] {
   const byId = new Map<string, Message>();
@@ -46,7 +78,15 @@ export function dedupeMessages(messages: Message[], maxItems?: number): Message[
     const incomingSender = message.expand?.sender || (message as any)?.sender && typeof (message as any).sender !== 'string';
     const existingAttachmentCount = ((existing as any)?.attachments || existing?.expand?.['attachments(message)'] || existing?.expand?.attachments_via_message || []).length;
     const incomingAttachmentCount = ((message as any)?.attachments || message.expand?.['attachments(message)'] || message.expand?.attachments_via_message || []).length;
-    const incomingIsRicher = relationRichness(incomingSender) > relationRichness(existingSender) || incomingAttachmentCount > existingAttachmentCount || Boolean(message.reply_to && !existing?.reply_to);
+    const hasComparableIncomingRelations =
+      relationRichness(incomingSender) > 0 ||
+      incomingAttachmentCount > 0 ||
+      Boolean(message.expand?.reply_to);
+    const incomingIsRicher =
+      relationRichness(incomingSender) > relationRichness(existingSender) ||
+      incomingAttachmentCount > existingAttachmentCount ||
+      Boolean(message.reply_to && !existing?.reply_to) ||
+      (hasComparableIncomingRelations && mergeRelationRevision(message) !== mergeRelationRevision(existing));
     const incomingIsNewer = Boolean(message.updated && existing?.updated && message.updated > existing.updated);
     if (!existing || (!message.is_pending && existing.is_pending) || (!message.is_pending && !existing?.is_pending && (incomingIsRicher || incomingIsNewer))) {
       byId.set(message.id, message);
@@ -93,6 +133,22 @@ export function mergeOlderMessagePage(
   maxItems = MAX_ACTIVE_MESSAGES,
 ): Message[] {
   return mergeMessagePage(existing, page, maxItems, 'oldest');
+}
+
+/**
+ * Pagination can replace a full retained window with an equally sized older
+ * window. Length is therefore not a valid signal that history advanced.
+ */
+export function didMessageWindowMoveOlder(
+  previous: Message[],
+  next: Message[],
+): boolean {
+  if (next.length === 0) return false;
+  if (previous.length === 0) return true;
+  const previousOldest = previous[0];
+  const nextOldest = next[0];
+  return previousOldest.id !== nextOldest.id ||
+    compareMessageOrder(nextOldest, previousOldest) < 0;
 }
 
 /**
