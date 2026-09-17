@@ -9,6 +9,7 @@
 - Shell migration alone does not prove faster chat/voice operation, notification parity or background-call stability. Those require signed-in Android device checks; no backend/API canary flag is enabled by this build change.
 - Added Android build-plan and CI regression tests to prevent returning to the legacy shell accidentally.
 - Migrated the separate quality-gate Android job to the same Tauri runner, so it no longer validates Capacitor while release CI validates Tauri.
+- Added a Windows release helper for the device-local permanent Android signing identity. It decrypts the DPAPI-protected password only for the current user and removes temporary Gradle signing properties after each build.
 
 ## [3.9-runtime-update-isolation] - 2026-09-17
 ### Focused media state, no-op presence suppression, and allocation-free speaking samples

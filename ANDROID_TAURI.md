@@ -27,6 +27,15 @@ Run `npm run build:android:release` for optimized APK and AAB outputs. The
 command refuses to run without the properties file; Gradle validates the key.
 Never distribute an unsigned APK or label a debug-key APK as a production release.
 
+On the primary Windows build device, the permanent release identity is stored at
+`%LOCALAPPDATA%\SirverData\signing`. Its password is protected with Windows DPAPI
+for the current user, and the directory ACL is restricted. Run
+`powershell -ExecutionPolicy Bypass -File scripts/build-android-release.ps1` to
+materialize the ignored Gradle properties only for the duration of a signed build.
+The helper deletes the plaintext properties in a `finally` block. Back up the
+keystore and recovery credentials securely: losing this identity prevents future
+APK updates signed as the same application.
+
 CI push builds produce a debug artifact. A version tag or manual run with
 `release=true` additionally requires repository secrets `ANDROID_KEY_BASE64`,
 `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. CI supports a shared
