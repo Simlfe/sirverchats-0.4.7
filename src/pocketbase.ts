@@ -9,6 +9,8 @@ import wsService from './services/websocket';
 import ENDPOINTS from './config/endpoints';
 import APP_URLS from './config/urls';
 import { buildOlderMessageFilter, cursorFromMessage, INITIAL_MESSAGE_PAGE_SIZE } from './services/messagePagination';
+import { isUserPresenceExpired } from './services/presencePolicy';
+export { USER_PRESENCE_EXPIRY_MS } from './services/presencePolicy';
 
 export class PocketBaseUnavailableError extends Error {
   readonly code = 'BACKEND_UNAVAILABLE';
@@ -90,9 +92,10 @@ export function getEffectiveUserStatus(user: User | null | undefined, isCurrentU
     return 'offline';
   }
 
-  const now = Date.now();
-  // Presence timeout after 60 seconds (60000 ms) without a heartbeat
-  if (now - lastHeartbeatMs > 60000) {
+  // Use the same expiry window as the periodic member-list refresh. A single
+  // policy avoids the same user appearing online in one surface and offline
+  // in another.
+  if (isUserPresenceExpired(user)) {
     return 'offline';
   }
 

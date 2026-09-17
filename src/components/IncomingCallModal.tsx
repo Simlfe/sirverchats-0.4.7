@@ -2,11 +2,11 @@ import React, { useMemo, useState } from 'react';
 import { Phone, PhoneOff, Video, Mic, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Avatar from './Avatar';
-import useRealtimeMedia from '../context/MediaContext';
+import { useMediaSession } from '../context/MediaContext';
 import { getServerMemberAvatarUrl, pbService } from '../pocketbase';
 
 export const IncomingCallModal: React.FC = () => {
-  const { incomingCall, acceptCall, declineCall } = useRealtimeMedia();
+  const { incomingCall, acceptCall, declineCall } = useMediaSession();
   const [isAccepting, setIsAccepting] = useState(false);
 
   const callerAvatarUrl = useMemo(() => {

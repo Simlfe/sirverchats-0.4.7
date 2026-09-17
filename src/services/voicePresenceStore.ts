@@ -17,6 +17,25 @@ export interface VoiceParticipantInfo {
   lastHeartbeat?: number;
 }
 
+function hasVisiblePresenceChanged(
+  previous: VoiceParticipantInfo | null | undefined,
+  next: VoiceParticipantInfo
+): boolean {
+  if (!previous) return true;
+  return previous.channelId !== next.channelId ||
+    previous.serverId !== next.serverId ||
+    previous.userId !== next.userId ||
+    previous.userRef?.id !== next.userRef?.id ||
+    previous.displayName !== next.displayName ||
+    previous.avatar !== next.avatar ||
+    previous.isMuted !== next.isMuted ||
+    previous.isDeafened !== next.isDeafened ||
+    previous.isSpeaking !== next.isSpeaking ||
+    previous.isCameraEnabled !== next.isCameraEnabled ||
+    previous.isScreenSharing !== next.isScreenSharing ||
+    previous.joinedAt !== next.joinedAt;
+}
+
 class VoicePresenceStore {
   // Map of channelId -> Map of userId -> VoiceParticipantInfo
   private store: Map<string, Map<string, VoiceParticipantInfo>> = new Map();
@@ -243,10 +262,12 @@ class VoicePresenceStore {
     } else {
       // status === 'joined' || status === 'updated'
       // Remove user from ALL other channels across store so user never appears in two channels
+      let removedFromOtherChannel = false;
       this.store.forEach((channelMap, cId) => {
         if (cId !== channelId && channelMap.has(userId)) {
           channelMap.delete(userId);
           if (channelMap.size === 0) this.store.delete(cId);
+          removedFromOtherChannel = true;
         }
       });
 
@@ -278,7 +299,12 @@ class VoicePresenceStore {
       };
 
       channelMap.set(userId, info);
-      this.notify();
+      // Heartbeats refresh lastHeartbeat every three seconds but do not change
+      // anything rendered. Notify sidebar/voice consumers only for a visible
+      // transition, not for every keepalive packet.
+      if (removedFromOtherChannel || hasVisiblePresenceChanged(existing, info)) {
+        this.notify();
+      }
     }
   }
 
@@ -317,6 +343,14 @@ class VoicePresenceStore {
     }
 
     this.startHeartbeatAndPruning();
+
+    // Participant-list events include remote speaking and track changes. They
+    // used to rebroadcast the unchanged local participant every time. The
+    // regular heartbeat already handles liveness, so no visible change means
+    // there is nothing to send or notify.
+    if (this.localParticipant && !hasVisiblePresenceChanged(this.localParticipant, info)) {
+      return;
+    }
 
     // If local user switched channels, broadcast 'left' for previous channel and clean store
     if (this.localParticipant && this.localParticipant.channelId !== info.channelId) {

@@ -21,7 +21,7 @@ import {
   UserPlus,
   Loader2,
 } from 'lucide-react';
-import { useRealtimeMedia } from '../context/MediaContext';
+import { useMediaDuration, useMediaParticipants, useMediaSession } from '../context/MediaContext';
 import { getServerMemberAvatarUrl, pbService } from '../pocketbase';
 import Avatar from './Avatar';
 import AudioMixerModal from './AudioMixerModal';
@@ -48,7 +48,6 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
 
   const {
     activeRoom,
-    participants,
     connectionState,
     isMuted,
     isDeafened,
@@ -57,7 +56,6 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
     incomingCall,
     outgoingCall,
     isRingMuted,
-    formattedDuration,
     toggleMute,
     toggleDeafen,
     toggleCamera,
@@ -68,7 +66,9 @@ export const FloatingCallWindow: React.FC<FloatingCallWindowProps> = ({
     cancelOutgoingCall,
     leaveRoomOrCall,
     inviteUsersToCall,
-  } = useRealtimeMedia();
+  } = useMediaSession();
+  const participants = useMediaParticipants();
+  const { formattedDuration } = useMediaDuration();
 
   const isRtl = lang === 'ar';
   // The full voice panel already owns the active-room UI.  Keep the compact

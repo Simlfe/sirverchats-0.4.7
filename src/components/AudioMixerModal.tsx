@@ -4,7 +4,7 @@ import { Sliders, Volume2, VolumeX, Mic, X, RotateCcw, ScreenShare } from 'lucid
 import { audioMixer, AudioMixerState } from '../services/audioMixer';
 import { MediaParticipant } from '../types/media';
 import { AudioOutputRoute } from '../types/media';
-import { useRealtimeMedia } from '../context/MediaContext';
+import { useMediaSession } from '../context/MediaContext';
 
 interface AudioMixerModalProps {
   isOpen: boolean;
@@ -25,7 +25,7 @@ export const AudioMixerModal: React.FC<AudioMixerModalProps> = ({
 }) => {
   const isAr = lang === 'ar';
   const [mixerState, setMixerState] = useState<AudioMixerState>(audioMixer.getState());
-  const { audioOutputRoute, setAudioOutputRoute } = useRealtimeMedia();
+  const { audioOutputRoute, setAudioOutputRoute } = useMediaSession();
   const [routeNotice, setRouteNotice] = useState<string | null>(null);
 
   useEffect(() => {

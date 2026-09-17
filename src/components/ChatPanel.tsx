@@ -239,6 +239,7 @@ import PinnedMessagesPopover from "./PinnedMessagesPopover";
 import MinimizedVoiceBar from "./MinimizedVoiceBar";
 import { toLatinNumerals } from "../lib/utils";
 import { readSessionSnapshot, writeSessionSnapshot } from "../services/sessionSnapshot";
+import { expireStaleUsers } from "../services/presencePolicy";
 
 export interface StagedAttachment {
   id: string;
@@ -1927,22 +1928,10 @@ function ChatPanel({
     window.addEventListener("server-member-updated", handleServerMemberUpdated);
     window.addEventListener("user-presence-changed", handleUserPresenceChanged);
 
-    // Periodic evaluation timer to refresh presence status (e.g. timeout after 90s heartbeat)
+    // Apply the shared expiry policy. Once stale users have transitioned, the
+    // helper returns the same array so this timer does not force a rerender.
     const presenceTimer = setInterval(() => {
-      setAllUsersList((prev) => {
-        let changed = false;
-        const now = Date.now();
-        for (const u of prev) {
-          if (u.last_seen) {
-            const diff = now - new Date(u.last_seen).getTime();
-            if (diff > 90000 && u.status !== "offline") {
-              changed = true;
-              break;
-            }
-          }
-        }
-        return changed ? [...prev] : prev;
-      });
+      setAllUsersList((prev) => expireStaleUsers(prev));
     }, 15000);
 
     return () => {

@@ -1,5 +1,14 @@
 # Sirver Application Changelog
 
+## [3.9-runtime-update-isolation] - 2026-09-17
+### Focused media state, no-op presence suppression, and allocation-free speaking samples
+- Split the media provider into focused session, participant, duration, and telemetry contexts. Chat/application consumers now subscribe only to session state, so one-second call timers, camera diagnostics, and speaking events no longer rerender the entire application tree.
+- Updated every built-in media consumer to use the narrowest relevant hook while retaining the combined hook for compatibility.
+- Reused one analyser buffer for the 100 ms local speaking detector and ignored duplicate SFU speaking events. Speaking changes now replace only the affected participant object so memoized participant tiles update correctly while unchanged tiles remain stable.
+- Suppressed unchanged local voice-presence rebroadcasts and stopped notifying sidebar listeners for heartbeat-only packets. The three-second liveness heartbeat remains active during a call without becoming a three-second React render loop.
+- Unified user-presence expiry at 90 seconds. Stale users now transition to `offline` once instead of cloning the same array every 15 seconds, and the channel list schedules its next actual expiry rather than polling continuously.
+- Added presence-policy regression tests covering the expiry boundary, one-time offline transition, and stable-array no-op behavior.
+
 ## [3.9-chat-history-critical-path] - 2026-09-17
 ### Paint-before-persistence, capped-window pagination, and real feed virtualization
 - Successful channel and DM pages now update React and the in-memory cache before their IndexedDB writes are queued. Per-conversation persistence is serialized in the background and page/metadata records commit in one transaction.

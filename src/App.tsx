@@ -46,7 +46,7 @@ import { parseCallLog } from './services/callLogService';
 import { offlineCacheService } from './services/offlineCacheService';
 import { parseReactions, toggleReactionInList } from './components/MessageReactions';
 import { areMessagesEqual, isSingleMessageEqual } from './lib/messageDiff';
-import useRealtimeMedia from './context/MediaContext';
+import { useMediaSession } from './context/MediaContext';
 import { realtimeMediaProvider } from './media/RealtimeMediaProvider';
 import voicePresenceStore from './services/voicePresenceStore';
 import { readSessionSnapshot, writeSessionSnapshot } from './services/sessionSnapshot';
@@ -158,7 +158,7 @@ export default function App() {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  const { activeRoom, leaveRoomOrCall, joinVoiceRoom, startDmCall } = useRealtimeMedia();
+  const { activeRoom, leaveRoomOrCall, joinVoiceRoom, startDmCall } = useMediaSession();
 
   const prevActiveRoomIdRef = useRef<string | null>(null);
 

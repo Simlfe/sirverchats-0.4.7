@@ -24,7 +24,7 @@ import {
 import { voiceSessionRecovery } from '../services/voiceSessionRecovery';
 import { recordCallLog } from '../services/callLogService';
 
-interface MediaContextType {
+export interface MediaContextType {
   activeRoom: RoomConfig | null;
   participants: MediaParticipant[];
   connectionState: MediaConnectionState;
@@ -67,7 +67,24 @@ interface MediaContextType {
   setSFUConfig: (config: SFUServerConfig) => void;
 }
 
-const MediaContext = createContext<MediaContextType | null>(null);
+type MediaSessionContextType = Omit<
+  MediaContextType,
+  'participants' | 'activeCallDuration' | 'formattedDuration' | 'cameraTelemetry'
+>;
+
+interface MediaDurationContextType {
+  activeCallDuration: number;
+  formattedDuration: string;
+}
+
+// Keep high-frequency media state out of the session context. Duration and
+// telemetry update once per second, while speaking/track events can update the
+// participant list even faster. Consumers such as App and ChatPanel should not
+// re-render for those changes when they only need session state or actions.
+const MediaSessionContext = createContext<MediaSessionContextType | null>(null);
+const MediaParticipantsContext = createContext<MediaParticipant[] | null>(null);
+const MediaDurationContext = createContext<MediaDurationContextType | null>(null);
+const MediaTelemetryContext = createContext<CameraTelemetryData | null | undefined>(undefined);
 
 const createVoiceSessionId = () => `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
@@ -1077,10 +1094,9 @@ export const MediaProvider: React.FC<{
 
   const formattedDuration = React.useMemo(() => formatDuration(activeCallDuration), [activeCallDuration]);
 
-  const value = React.useMemo(
+  const sessionValue = React.useMemo<MediaSessionContextType>(
     () => ({
       activeRoom,
-      participants,
       connectionState,
       isMuted,
       isDeafened,
@@ -1089,11 +1105,8 @@ export const MediaProvider: React.FC<{
       incomingCall,
       outgoingCall,
       isRingMuted,
-      activeCallDuration,
-      formattedDuration,
       error,
       cameraQualityProfile,
-      cameraTelemetry,
       audioOutputRoute,
 
       joinVoiceRoom,
@@ -1119,7 +1132,6 @@ export const MediaProvider: React.FC<{
     }),
     [
       activeRoom,
-      participants,
       connectionState,
       isMuted,
       isDeafened,
@@ -1128,11 +1140,8 @@ export const MediaProvider: React.FC<{
       incomingCall,
       outgoingCall,
       isRingMuted,
-      activeCallDuration,
-      formattedDuration,
       error,
       cameraQualityProfile,
-      cameraTelemetry,
       audioOutputRoute,
       joinVoiceRoom,
       startDmCall,
@@ -1157,19 +1166,64 @@ export const MediaProvider: React.FC<{
     ]
   );
 
+  const durationValue = React.useMemo(
+    () => ({ activeCallDuration, formattedDuration }),
+    [activeCallDuration, formattedDuration]
+  );
+
   return (
-    <MediaContext.Provider value={value}>
-      {children}
-    </MediaContext.Provider>
+    <MediaSessionContext.Provider value={sessionValue}>
+      <MediaParticipantsContext.Provider value={participants}>
+        <MediaDurationContext.Provider value={durationValue}>
+          <MediaTelemetryContext.Provider value={cameraTelemetry}>
+            {children}
+          </MediaTelemetryContext.Provider>
+        </MediaDurationContext.Provider>
+      </MediaParticipantsContext.Provider>
+    </MediaSessionContext.Provider>
   );
 };
 
-export const useRealtimeMedia = (): MediaContextType => {
-  const ctx = useContext(MediaContext);
+export const useMediaSession = (): MediaSessionContextType => {
+  const ctx = useContext(MediaSessionContext);
   if (!ctx) {
-    throw new Error('useRealtimeMedia must be used within a MediaProvider');
+    throw new Error('useMediaSession must be used within a MediaProvider');
   }
   return ctx;
+};
+
+export const useMediaParticipants = (): MediaParticipant[] => {
+  const ctx = useContext(MediaParticipantsContext);
+  if (!ctx) {
+    throw new Error('useMediaParticipants must be used within a MediaProvider');
+  }
+  return ctx;
+};
+
+export const useMediaDuration = (): MediaDurationContextType => {
+  const ctx = useContext(MediaDurationContext);
+  if (!ctx) {
+    throw new Error('useMediaDuration must be used within a MediaProvider');
+  }
+  return ctx;
+};
+
+export const useMediaTelemetry = (): CameraTelemetryData | null => {
+  const ctx = useContext(MediaTelemetryContext);
+  if (ctx === undefined) {
+    throw new Error('useMediaTelemetry must be used within a MediaProvider');
+  }
+  return ctx;
+};
+
+// Compatibility hook for external callers. In-app consumers use the focused
+// hooks above so they subscribe only to the state they actually render.
+export const useRealtimeMedia = (): MediaContextType => {
+  const session = useMediaSession();
+  const participants = useMediaParticipants();
+  const duration = useMediaDuration();
+  const cameraTelemetry = useMediaTelemetry();
+  return { ...session, participants, ...duration, cameraTelemetry };
 };
 
 export default useRealtimeMedia;

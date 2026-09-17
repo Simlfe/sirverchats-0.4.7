@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Server, Channel, User, Call, UnreadChannelInfo } from '../types';
 import { pbService, getServerIconUrl, getServerBannerUrl, parseChannelOptions, getEffectiveUserStatus, mergeUserRecord, getServerMemberAvatarUrl } from '../pocketbase';
+import { USER_PRESENCE_EXPIRY_MS } from '../services/presencePolicy';
 import { getCachedUserSettings } from '../lib/userSettings';
 import { filterAccessibleChannels } from '../lib/channelPermissions';
 import { stripServerPassword } from '../lib/serverPassword';
@@ -32,7 +33,7 @@ import {
   Users,
   X
 } from 'lucide-react';
-import useRealtimeMedia from '../context/MediaContext';
+import { useMediaSession } from '../context/MediaContext';
 import voicePresenceStore from '../services/voicePresenceStore';
 import wsService from '../services/websocket';
 import { ScreenShare, Video } from 'lucide-react';
@@ -218,13 +219,13 @@ function ChannelList({
   onExpandVoice,
   onCloseDm,
 }: ChannelListProps) {
-  const { activeRoom, participants } = useRealtimeMedia();
+  const { activeRoom } = useMediaSession();
   const [showServerDropdown, setShowServerDropdown] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'servers' | 'dms'>('servers');
   const [dmSearchQuery, setDmSearchQuery] = useState('');
   const [showStatusPicker, setShowStatusPicker] = useState(false);
   const [showCustomStatusModal, setShowCustomStatusModal] = useState(false);
-  const [, setPresenceTick] = useState(0);
+  const [presenceTick, setPresenceTick] = useState(0);
   const [, setVoicePresenceTick] = useState(0);
 
   React.useEffect(() => {
@@ -241,15 +242,33 @@ function ChannelList({
     };
 
     window.addEventListener('user-presence-changed', handleUserPresenceChanged);
-    const timer = setInterval(() => {
-      setPresenceTick((t) => t + 1);
-    }, 15000);
 
     return () => {
       window.removeEventListener('user-presence-changed', handleUserPresenceChanged);
-      clearInterval(timer);
     };
   }, []);
+
+  React.useEffect(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
+    const now = Date.now();
+    let nextExpiryAt = Number.POSITIVE_INFINITY;
+    for (const channel of allDmChannels) {
+      const user = channel.recipientUser;
+      if (!user?.last_seen || user.status === 'offline') continue;
+      const lastSeenAt = Date.parse(user.last_seen);
+      if (!Number.isFinite(lastSeenAt)) continue;
+      const expiresAt = lastSeenAt + USER_PRESENCE_EXPIRY_MS;
+      if (expiresAt > now && expiresAt < nextExpiryAt) nextExpiryAt = expiresAt;
+    }
+
+    if (!Number.isFinite(nextExpiryAt)) return;
+    const timer = window.setTimeout(
+      () => setPresenceTick((tick) => tick + 1),
+      Math.max(100, nextExpiryAt - now + 25)
+    );
+    return () => window.clearTimeout(timer);
+  }, [allDmChannels, presenceTick]);
 
   const lastServerChannelRef = React.useRef<Channel | null>(null);
   const lastDmChannelRef = React.useRef<Channel | null>(null);

@@ -4,7 +4,7 @@ import { MediaParticipant } from '../types/media';
 import { User } from '../types';
 import Avatar from './Avatar';
 import { getServerMemberAvatarUrl, pbService } from '../pocketbase';
-import useRealtimeMedia from '../context/MediaContext';
+import { useMediaSession } from '../context/MediaContext';
 import VideoPlayer from './video/VideoPlayer';
 import ParticipantDiagnosticsOverlay from './ParticipantDiagnosticsOverlay';
 import VolumeSliderPortal from './VolumeSliderPortal';
@@ -31,7 +31,7 @@ export const ParticipantTile: React.FC<ParticipantTileProps> = React.memo(({
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [showStreamEndedToast, setShowStreamEndedToast] = useState(false);
 
-  const { activeRoom, switchCamera } = useRealtimeMedia();
+  const { activeRoom, switchCamera } = useMediaSession();
   const serverId = activeRoom?.serverId;
 
   const volumeBtnRef = useRef<HTMLButtonElement | null>(null);

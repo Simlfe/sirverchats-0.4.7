@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useRealtimeMedia } from '../context/MediaContext';
+import { useMediaSession, useMediaTelemetry } from '../context/MediaContext';
 import { CameraQualityProfile } from '../types/media';
 import { Camera, Video, Zap, Activity, ShieldCheck, Gauge, Info, RefreshCw, Cpu, Layers, Mic, MicOff, Volume2 } from 'lucide-react';
 import realtimeMediaProvider from '../media/RealtimeMediaProvider';
@@ -12,14 +12,14 @@ export default function CameraQualitySettings({ lang }: CameraQualitySettingsPro
   const {
     cameraQualityProfile,
     setCameraQualityProfile,
-    cameraTelemetry,
     isCameraEnabled,
     toggleCamera,
     switchCamera,
     switchMicrophone,
     isMuted,
     toggleMute,
-  } = useRealtimeMedia();
+  } = useMediaSession();
+  const cameraTelemetry = useMediaTelemetry();
 
   const isAr = lang === 'ar';
 

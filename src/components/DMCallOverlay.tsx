@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { PhoneOff, Mic, MicOff, Headphones, Video, VideoOff, ScreenShare, Radio, Volume2, RotateCw, SlidersHorizontal } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import useRealtimeMedia from '../context/MediaContext';
+import { useMediaDuration, useMediaParticipants, useMediaSession } from '../context/MediaContext';
 import ParticipantTile from './ParticipantTile';
 import AudioMixerModal from './AudioMixerModal';
 import { User } from '../types';
@@ -16,13 +16,11 @@ export const DMCallOverlay: React.FC<DMCallOverlayProps> = ({ onSelectUser, lang
   const [isAudioMixerOpen, setIsAudioMixerOpen] = useState(false);
   const {
     activeRoom,
-    participants,
     connectionState,
     isMuted,
     isDeafened,
     isCameraEnabled,
     isScreenSharing,
-    formattedDuration,
     leaveRoomOrCall,
     toggleMute,
     toggleDeafen,
@@ -30,7 +28,9 @@ export const DMCallOverlay: React.FC<DMCallOverlayProps> = ({ onSelectUser, lang
     switchCamera,
     toggleScreenShare,
     setParticipantVolume,
-  } = useRealtimeMedia();
+  } = useMediaSession();
+  const participants = useMediaParticipants();
+  const { formattedDuration } = useMediaDuration();
 
   if (!activeRoom || activeRoom.roomType !== 'dm_call') return null;
 

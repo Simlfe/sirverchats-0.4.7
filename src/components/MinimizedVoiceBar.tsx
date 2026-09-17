@@ -18,7 +18,7 @@ import {
   WifiOff,
   SlidersHorizontal
 } from 'lucide-react';
-import { useRealtimeMedia } from '../context/MediaContext';
+import { useMediaDuration, useMediaParticipants, useMediaSession } from '../context/MediaContext';
 import AudioMixerModal from './AudioMixerModal';
 import { Channel } from '../types';
 
@@ -44,19 +44,19 @@ export const MinimizedVoiceBar: React.FC<MinimizedVoiceBarProps> = ({
   const [isAudioMixerOpen, setIsAudioMixerOpen] = useState(false);
   const {
     activeRoom,
-    participants,
     connectionState,
     isMuted,
     isDeafened,
     isCameraEnabled,
     isScreenSharing,
-    formattedDuration,
     toggleMute,
     toggleDeafen,
     toggleCamera,
     toggleScreenShare,
     leaveRoomOrCall,
-  } = useRealtimeMedia();
+  } = useMediaSession();
+  const participants = useMediaParticipants();
+  const { formattedDuration } = useMediaDuration();
 
   if (!activeRoom) {
     return null;

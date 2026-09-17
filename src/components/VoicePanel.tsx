@@ -26,7 +26,7 @@ import {
   SlidersHorizontal,
   RotateCw,
 } from 'lucide-react';
-import useRealtimeMedia from '../context/MediaContext';
+import { useMediaDuration, useMediaParticipants, useMediaSession } from '../context/MediaContext';
 import ParticipantTile from './ParticipantTile';
 import VideoPlayer from './video/VideoPlayer';
 import AudioMixerModal from './AudioMixerModal';
@@ -67,13 +67,11 @@ function VoicePanel({
   const isAr = lang === 'ar';
   const {
     activeRoom,
-    participants,
     connectionState,
     isMuted,
     isDeafened,
     isCameraEnabled,
     isScreenSharing,
-    formattedDuration,
     error,
     joinVoiceRoom,
     leaveRoomOrCall,
@@ -84,7 +82,9 @@ function VoicePanel({
     toggleScreenShare,
     setParticipantVolume,
     clearError,
-  } = useRealtimeMedia();
+  } = useMediaSession();
+  const participants = useMediaParticipants();
+  const { formattedDuration } = useMediaDuration();
 
   const [selectedMode, setSelectedMode] = useState<'voice' | 'video' | 'screen'>('voice');
   const [isAttemptingJoin, setIsAttemptingJoin] = useState(false);

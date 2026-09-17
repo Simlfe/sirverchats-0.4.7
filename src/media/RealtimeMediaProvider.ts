@@ -73,6 +73,7 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
   private scriptProcessor: ScriptProcessorNode | null = null;
   private mediaSource: MediaStreamAudioSourceNode | null = null;
   private speakingDetectorInterval: ReturnType<typeof setInterval> | null = null;
+  private speakingSampleBuffer: Uint8Array | null = null;
 
   private sfuAdapter: SFUProviderAdapter | null = null;
   private sfuAdapterLoad: Promise<SFUProviderAdapter> | null = null;
@@ -209,8 +210,11 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
       case 'speaking_changed':
         if (event.userId && typeof event.data?.isSpeaking === 'boolean') {
           const current = this.participants.get(event.userId);
-          if (current) {
-            current.isSpeaking = event.data.isSpeaking;
+          if (current && current.isSpeaking !== event.data.isSpeaking) {
+            this.participants.set(event.userId, {
+              ...current,
+              isSpeaking: event.data.isSpeaking,
+            });
             this.notifyParticipantsChanged();
           }
         }
@@ -1705,6 +1709,7 @@ Adaptive Bitrate Monitor     : Running (monitoring packet loss & network through
 
       this.audioAnalyser = this.audioContext.createAnalyser();
       this.audioAnalyser.fftSize = 512;
+      this.speakingSampleBuffer = new Uint8Array(this.audioAnalyser.frequencyBinCount);
 
       this.mediaSource = this.audioContext.createMediaStreamSource(this.localAudioStream);
       this.mediaSource.connect(this.audioAnalyser);
@@ -1717,8 +1722,8 @@ Adaptive Bitrate Monitor     : Running (monitoring packet loss & network through
       let lastSpeakingState = false;
 
       const checkVolume = () => {
-        if (!this.audioAnalyser || this.isMuted) return;
-        const dataArray = new Uint8Array(this.audioAnalyser.frequencyBinCount);
+        if (!this.audioAnalyser || !this.speakingSampleBuffer || this.isMuted) return;
+        const dataArray = this.speakingSampleBuffer;
         this.audioAnalyser.getByteFrequencyData(dataArray);
 
         let sum = 0;
@@ -1760,6 +1765,7 @@ Adaptive Bitrate Monitor     : Running (monitoring packet loss & network through
       this.audioContext = null;
     }
     this.audioAnalyser = null;
+    this.speakingSampleBuffer = null;
   }
 
   private cleanupMediaTracks() {
