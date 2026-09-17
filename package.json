@@ -17,10 +17,10 @@
     "build:linux": "tauri build",
     "build:linux:dir": "tauri build --no-bundle",
     "build:arch": "bash ./arch/build-arch.sh",
-    "build:android": "npm run build && npx cap sync android",
+    "build:android": "node scripts/build-android.mjs debug",
     "build:android:apk": "node scripts/build-android.mjs debug",
     "build:android:release": "node scripts/build-android.mjs release",
-    "build:android:tauri": "npx tauri android build --debug --target aarch64 --split-per-abi --apk --ci"
+    "build:android:tauri": "node scripts/build-android.mjs debug"
   },
   "dependencies": {
     "@capacitor/app": "^8.1.1",

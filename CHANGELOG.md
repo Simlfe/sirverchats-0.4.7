@@ -1,5 +1,14 @@
 # Sirver Application Changelog
 
+## [3.9-tauri-android-build] - 2026-09-17
+### Android build pipeline uses the shared Tauri/Rust application
+- Routed every Android npm build entry point and CI artifact path to Tauri instead of Capacitor. Default APKs cover ARM64 and ARMv7, with validated target overrides for emulator builds.
+- Added clean-checkout Android initialization, explicit NDK validation, native Rust toolchain setup and pinned Android SDK/NDK versions in CI.
+- Release commands require a private signing configuration; tagged releases require signing secrets and publish only signed release artifacts. Debug candidates remain explicitly labeled.
+- Kept the existing Tauri identifier `top.sirverdata.app`; this installs separately from legacy `com.sirverdata.chat` and does not migrate its local session/cache.
+- Shell migration alone does not prove faster chat/voice operation, notification parity or background-call stability. Those require signed-in Android device checks; no backend/API canary flag is enabled by this build change.
+- Added Android build-plan and CI regression tests to prevent returning to the legacy shell accidentally.
+
 ## [3.9-runtime-update-isolation] - 2026-09-17
 ### Focused media state, no-op presence suppression, and allocation-free speaking samples
 - Split the media provider into focused session, participant, duration, and telemetry contexts. Chat/application consumers now subscribe only to session state, so one-second call timers, camera diagnostics, and speaking events no longer rerender the entire application tree.

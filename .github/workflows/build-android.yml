@@ -1,92 +1,89 @@
-name: Build and Deploy Android App
+name: Build Tauri Android App
 
 on:
   push:
-    branches:
-      - main
-      - master
-    tags:
-      - 'v*'
+    branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      release:
+        description: Build signed release APK and AAB (requires Android signing secrets)
+        type: boolean
+        default: false
 
 env:
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-android:
-    name: Build Android APK
+    name: Build Tauri Android APK
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
-
-      - name: Setup Java JDK 21
-        uses: actions/setup-java@v5
+          cache: npm
+      - uses: actions/setup-java@v5
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '21'
-          cache: 'gradle'
-          cache-dependency-path: 'android/**/*.gradle*'
-
-      - name: Accept Android SDK Licenses
+          cache: gradle
+          cache-dependency-path: 'src-tauri/gen/android/**/*.gradle*'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and pinned NDK
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
-
-      - name: Install Frontend Dependencies
-        run: npm ci --no-audit --no-fund
-
-      - name: Build Web Assets
-        run: npm run build
-
-      - name: Sync Capacitor Android Project
-        run: npx cap sync android
-
-      - name: Grant Execute Permission to gradlew
-        run: chmod +x android/gradlew
-
-      - name: Build Capacitor Android debug APK
-        working-directory: android
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
-
-      - name: Upload Android Debug APK
-        uses: actions/upload-artifact@v4
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          name: SirverData-Android-Debug-APK
-          path: android/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: warn
-
-      - name: Build unsigned release APK and AAB (tags/manual runs)
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        working-directory: android
-        run: ./gradlew assembleRelease bundleRelease --no-daemon --stacktrace
-
-      - name: Upload Android release artifacts
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - uses: Swatinem/rust-cache@v2
         with:
-          name: SirverData-Android-Release
+          workspaces: './src-tauri -> target'
+      - run: npm ci --no-audit --no-fund
+      - name: Make native Gradle launcher executable
+        run: chmod +x src-tauri/gen/android/gradlew
+      - name: Build installable Tauri debug APK (ARM64 and ARMv7)
+        run: npm run build:android:apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SirverData-Tauri-Android-Debug-APK
+          path: src-tauri/gen/android/app/build/outputs/apk/universal/debug/*.apk
+          if-no-files-found: error
+      - name: Configure production signing
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release == true
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          const { ANDROID_KEY_BASE64: key, ANDROID_KEY_ALIAS: alias, ANDROID_KEY_PASSWORD: password, RUNNER_TEMP: temp } = process.env;
+          if (!key || !alias || !password) throw new Error('Production Android signing secrets are required; debug/unsigned artifacts cannot become a release.');
+          const escape = value => value.replaceAll('\\', '\\\\').replaceAll('\r', '\\r').replaceAll('\n', '\\n');
+          const path = `${temp}/android-release.jks`;
+          writeFileSync(path, Buffer.from(key, 'base64'), { mode: 0o600 });
+          writeFileSync('src-tauri/gen/android/keystore.properties', `storeFile=${escape(path)}\nkeyAlias=${escape(alias)}\npassword=${escape(password)}\n`, { mode: 0o600 });
+          NODE
+      - name: Build signed Tauri release APK and AAB
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release == true
+        run: npm run build:android:release
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release == true
+        with:
+          name: SirverData-Tauri-Android-Release
           path: |
-            android/app/build/outputs/apk/release/*.apk
-            android/app/build/outputs/bundle/release/*.aab
-          if-no-files-found: warn
-
-      - name: Attach APK to GitHub Release
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+            src-tauri/gen/android/app/build/outputs/bundle/universalRelease/*.aab
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
         with:
           files: |
-            android/app/build/outputs/apk/debug/*.apk
-            android/app/build/outputs/apk/release/*.apk
-            android/app/build/outputs/bundle/release/*.aab
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+            src-tauri/gen/android/app/build/outputs/bundle/universalRelease/*.aab
+          fail_on_unmatched_files: true
