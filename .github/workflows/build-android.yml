@@ -25,7 +25,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -46,7 +45,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
-      - run: npm ci --no-audit --no-fund
+      - run: if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
       - name: Make native Gradle launcher executable
         run: chmod +x src-tauri/gen/android/gradlew
       - name: Build installable Tauri debug APK (ARM64 and ARMv7)
