@@ -2061,15 +2061,7 @@ class PocketBaseService {
 
     const rawItems = (records.items as any as Message[]).filter((message) => {
       if (message.deleted || message.deleted_at || MessageDeletionService.isMessageDeleted(message.id)) return false;
-      if (!message.has_attachment) return true;
-      const expanded = message.expand || {};
-      const attachments = [
-        ...(expanded['attachments(message)'] || []),
-        ...(expanded['private_attachments(message)'] || []),
-        ...(expanded.attachments_via_message || []),
-        ...(expanded.private_attachments_via_message || []),
-      ];
-      return attachments.length > 0;
+      return true;
     });
     const hasMore = records.items.length > safeLimit;
     const pageItems = rawItems.slice(0, safeLimit).reverse();
@@ -2157,12 +2149,7 @@ class PocketBaseService {
       return message;
     }).filter((message) => {
       if (message.deleted || message.deleted_at || MessageDeletionService.isMessageDeleted(message.id)) return false;
-      if (!message.has_attachment) return true;
-      const expanded = message.expand || {};
-      return (
-        (expanded['attachments(message)'] || []).length > 0 ||
-        (expanded['private_attachments(message)'] || []).length > 0
-      );
+      return true;
     });
     const pageItems = rawItems.slice(0, safeLimit).reverse();
     pageItems.forEach((message) => this.cacheMessageRecord(message));
@@ -2231,10 +2218,6 @@ class PocketBaseService {
       const readyItems = rawItems.filter((m) => {
         if (m.deleted || Boolean(m.deleted_at && m.deleted_at !== '') || MessageDeletionService.isMessageDeleted(m.id)) {
           return false;
-        }
-        if (m.has_attachment) {
-          const atts = m.expand?.['attachments(message)'];
-          return Array.isArray(atts) && atts.length > 0;
         }
         return true;
       });
@@ -2417,9 +2400,8 @@ class PocketBaseService {
       });
       const rawItems = (records.items as any as Message[]);
       return rawItems.filter((m) => {
-        if (m.has_attachment) {
-          const atts = m.expand?.['attachments(message)'];
-          return Array.isArray(atts) && atts.length > 0;
+        if (m.deleted || Boolean(m.deleted_at && m.deleted_at !== '') || MessageDeletionService.isMessageDeleted(m.id)) {
+          return false;
         }
         return true;
       });
@@ -4163,10 +4145,6 @@ class PocketBaseService {
             if (m.deleted || Boolean(m.deleted_at && m.deleted_at !== '') || MessageDeletionService.isMessageDeleted(m.id)) {
               return false;
             }
-            if (m.has_attachment) {
-              const atts = m.expand?.['attachments(message)'];
-              return Array.isArray(atts) && atts.length > 0;
-            }
             return true;
           });
           this.dmMessagesCache.set(targetServerId!, processed);
@@ -4199,10 +4177,6 @@ class PocketBaseService {
         if (m.deleted || Boolean(m.deleted_at && m.deleted_at !== '') || MessageDeletionService.isMessageDeleted(m.id)) {
           return false;
         }
-        if (m.has_attachment) {
-          const atts = m.expand?.['attachments(message)'];
-          return Array.isArray(atts) && atts.length > 0;
-        }
         return true;
       });
 
@@ -4233,10 +4207,6 @@ class PocketBaseService {
         }).filter((m) => {
           if (m.deleted || Boolean(m.deleted_at && m.deleted_at !== '') || MessageDeletionService.isMessageDeleted(m.id)) {
             return false;
-          }
-          if (m.has_attachment) {
-            const atts = m.expand?.['attachments(message)'];
-            return Array.isArray(atts) && atts.length > 0;
           }
           return true;
         });

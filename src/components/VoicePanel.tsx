@@ -251,28 +251,34 @@ function VoicePanel({
       ...participants.map((p) => p.userId),
     ]);
 
+    // Ensure current user is included immediately when connecting or joined
+    if (currentUser?.id && (isConnectingToThisChannel || isConnectedToThisChannel || isAttemptingJoin)) {
+      allUserIds.add(currentUser.id);
+    }
+
     const list: MediaParticipant[] = Array.from(allUserIds).map((userId) => {
       const pres = presenceMap.get(userId);
       const mediaP = mediaParticipantsMap.get(userId);
+      const isSelf = userId === currentUser?.id;
 
-      const displayName = pres?.displayName || mediaP?.displayName || mediaP?.username || 'User';
-      const avatar = pres?.avatar || mediaP?.avatar || '';
-      const joinedAt = pres?.joinedAt || mediaP?.joinedAt || 0;
+      const displayName = pres?.displayName || mediaP?.displayName || (isSelf ? (currentUser?.display_name || currentUser?.username) : '') || mediaP?.username || 'User';
+      const avatar = pres?.avatar || mediaP?.avatar || (isSelf ? currentUser?.avatar : '') || '';
+      const joinedAt = pres?.joinedAt || mediaP?.joinedAt || (isSelf ? Date.now() : 0);
 
       return {
         userId,
         username: displayName,
         displayName,
         avatar,
-        isMuted: mediaP !== undefined ? mediaP.isMuted : (pres?.isMuted ?? false),
-        isDeafened: mediaP !== undefined ? (mediaP.isDeafened || false) : (pres?.isDeafened || false),
+        isMuted: mediaP !== undefined ? mediaP.isMuted : (isSelf ? isMuted : (pres?.isMuted ?? false)),
+        isDeafened: mediaP !== undefined ? (mediaP.isDeafened || false) : (isSelf ? isDeafened : (pres?.isDeafened || false)),
         isSpeaking: mediaP !== undefined ? mediaP.isSpeaking : (pres?.isSpeaking ?? false),
-        isCameraEnabled: mediaP?.videoStream ? true : (mediaP !== undefined ? (mediaP.isCameraEnabled || false) : (pres?.isCameraEnabled ?? false)),
-        isScreenSharing: mediaP?.screenStream ? true : (mediaP !== undefined ? (mediaP.isScreenSharing || false) : (pres?.isScreenSharing ?? false)),
-        connectionState: mediaP !== undefined ? mediaP.connectionState : 'connected',
+        isCameraEnabled: mediaP?.videoStream ? true : (mediaP !== undefined ? (mediaP.isCameraEnabled || false) : (isSelf ? isCameraEnabled : (pres?.isCameraEnabled ?? false))),
+        isScreenSharing: mediaP?.screenStream ? true : (mediaP !== undefined ? (mediaP.isScreenSharing || false) : (isSelf ? isScreenSharing : (pres?.isScreenSharing ?? false))),
+        connectionState: mediaP !== undefined ? mediaP.connectionState : (isSelf && !isConnectedToThisChannel ? 'connecting' : 'connected'),
         volume: audioMixer.getParticipantVolume(userId),
         roomId: channel.id,
-        userRef: pres?.userRef || mediaP?.userRef || { id: userId, username: displayName },
+        userRef: pres?.userRef || mediaP?.userRef || (isSelf ? currentUser : { id: userId, username: displayName }),
         joinedAt,
         videoStream: mediaP?.videoStream || null,
         screenStream: mediaP?.screenStream || null,
@@ -300,8 +306,9 @@ function VoicePanel({
     gridColsClass = 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4';
   }
 
-  // 1. CONNECTED STATE: Show Active Voice Stage + Optional Side Chat Panel
-  if (isConnectedToThisChannel) {
+  // 1. CONNECTED OR CONNECTING STATE: Show Active Voice Stage immediately!
+  if (isConnectedToThisChannel || isConnectingToThisChannel || isAttemptingJoin) {
+    const isActuallyConnected = isConnectedToThisChannel;
     return (
       <div
         className={`flex-1 flex min-w-0 h-full select-none relative overflow-hidden transition-colors duration-300 ${themeClasses.panelBg}`}
@@ -318,13 +325,23 @@ function VoicePanel({
             style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}
           >
             <div>
-              <div className="flex items-center gap-2 text-accent font-bold text-xs uppercase tracking-wider">
-                <Radio className="w-3.5 h-3.5 animate-pulse text-emerald-500" />
-                <span className="text-emerald-500 font-extrabold">{t('voice_connected')}</span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-accent/15 border border-accent/30 text-accent font-mono font-bold">
-                  {formattedDuration}
-                </span>
-              </div>
+              {isActuallyConnected ? (
+                <div className="flex items-center gap-2 text-accent font-bold text-xs uppercase tracking-wider">
+                  <Radio className="w-3.5 h-3.5 animate-pulse text-emerald-500" />
+                  <span className="text-emerald-500 font-extrabold">{t('voice_connected')}</span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-accent/15 border border-accent/30 text-accent font-mono font-bold">
+                    {formattedDuration}
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-amber-500 font-bold text-xs uppercase tracking-wider">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-500" />
+                  <span className="text-amber-500 font-extrabold">{isAr ? 'جاري الاتصال...' : 'Connecting...'}</span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-500 font-mono font-bold">
+                    {channel.name}
+                  </span>
+                </div>
+              )}
 
               <div className="flex items-center gap-2.5 mt-1">
                 {onToggleSidebar && (
@@ -350,8 +367,10 @@ function VoicePanel({
             {/* Status Badges & Chat Toggle */}
             <div className="flex items-center gap-2 shrink-0">
               <div className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl border text-[10px] font-semibold font-mono ${themeClasses.buttonGroupBg}`}>
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="uppercase text-emerald-400 font-bold">{isAr ? 'متصل' : 'Connected'}</span>
+                <span className={`w-2 h-2 rounded-full ${isActuallyConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500 animate-spin'}`} />
+                <span className={`uppercase font-bold ${isActuallyConnected ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {isActuallyConnected ? (isAr ? 'متصل' : 'Connected') : (isAr ? 'جاري الاتصال' : 'Connecting')}
+                </span>
                 <span className="text-[var(--theme-text-muted)]">|</span>
                 <span className="text-accent font-bold">{participantCount}{isAr ? '/8 كحد أقصى' : '/8 Max'}</span>
               </div>
@@ -657,46 +676,7 @@ function VoicePanel({
     );
   }
 
-  // 2. CONNECTING STATE: Show Loading Stage
-  if (isConnectingToThisChannel) {
-    return (
-      <div
-        className={`flex-1 flex flex-col items-center justify-center min-w-0 h-full p-6 select-none relative overflow-hidden ${themeClasses.panelBg}`}
-        dir={isAr ? 'rtl' : 'ltr'}
-      >
-        <div className="flex flex-col items-center justify-center p-8 rounded-3xl border border-[var(--theme-border)] bg-[var(--theme-bg-card)] max-w-sm w-full text-center shadow-2xl space-y-4">
-          <div className="relative">
-            <div className="w-16 h-16 rounded-2xl bg-accent/20 flex items-center justify-center text-accent animate-pulse">
-              <Radio className="w-8 h-8 text-accent animate-spin" />
-            </div>
-          </div>
-          <div>
-            <h3 className="text-base font-extrabold text-[var(--theme-text-primary)]">
-              {isAr ? 'جاري الاتصال بالصوت...' : 'Connecting to Voice...'}
-            </h3>
-            <p className="text-xs text-[var(--theme-text-muted)] mt-1">
-              {isAr ? 'الانضمام إلى ' : 'Joining '}
-              <span className="text-accent font-bold">{channel.name}</span>
-            </p>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-accent font-mono">
-            <Loader2 className="w-4 h-4 animate-spin" />
-            <span>{isAr ? 'جاري إنشاء جلسة الاتصال...' : 'Establishing media session...'}</span>
-          </div>
-          <button
-            type="button"
-            onClick={handleLeaveRoom}
-            className="mt-2 px-4 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold text-xs border border-red-500/30 transition-all cursor-pointer flex items-center gap-1.5"
-          >
-            <PhoneOff className="w-3.5 h-3.5" />
-            <span>{isAr ? 'قطع الاتصال' : 'Disconnect'}</span>
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // 3. DISCONNECTED / PREVIEW STATE: Show "Join Voice" Gateway
+  // 2. DISCONNECTED / PREVIEW STATE: Show "Join Voice" Gateway
   return (
     <div
       className={`flex-1 flex flex-col min-w-0 h-full p-4 sm:p-6 select-none relative overflow-hidden transition-colors duration-300 ${themeClasses.panelBg}`}

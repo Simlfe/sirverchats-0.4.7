@@ -50,7 +50,7 @@ import { useMediaSession } from './context/MediaContext';
 import { realtimeMediaProvider } from './media/RealtimeMediaProvider';
 import voicePresenceStore from './services/voicePresenceStore';
 import { readSessionSnapshot, writeSessionSnapshot } from './services/sessionSnapshot';
-import { cursorFromMessage, dedupeMessages, didMessageWindowMoveOlder, mergeMessagePage, mergeOlderMessagePage, INITIAL_MESSAGE_PAGE_SIZE, OLDER_MESSAGE_PAGE_SIZE, MAX_ACTIVE_MESSAGES } from './services/messagePagination';
+import { cursorFromMessage, getOldestCursor, getNewestCursor, dedupeMessages, didMessageWindowMoveOlder, mergeMessagePage, mergeOlderMessagePage, INITIAL_MESSAGE_PAGE_SIZE, OLDER_MESSAGE_PAGE_SIZE, MAX_ACTIVE_MESSAGES } from './services/messagePagination';
 import { backendAvailability, BackendAvailability, isClientCancellation } from './services/backendAvailability';
 import { afterFirstPaint } from './services/afterPaint';
 import { apiV2Client, BootstrapResponse } from './services/apiV2Client';
@@ -98,7 +98,10 @@ export default function App() {
   // the last server/channel/messages immediately when a valid auth session is
   // already present.
   const [startupSnapshot] = useState(() => readSessionSnapshot());
-  const initialServer = startupSnapshot?.servers.find((server) => server.id === startupSnapshot.activeServerId) || startupSnapshot?.servers[0] || null;
+  const initialIsDm = startupSnapshot?.activeConversationKind === 'dm' || (typeof window !== 'undefined' && localStorage.getItem('last_active_conversation_type') === 'dm');
+  const initialServer = initialIsDm
+    ? null
+    : (startupSnapshot?.servers.find((server) => server.id === startupSnapshot.activeServerId) || (startupSnapshot?.activeServerId ? null : (startupSnapshot?.servers[0] || null)));
   const initialChannel = startupSnapshot?.activeChannelId
     ? Object.values(startupSnapshot.channelsByServer as Record<string, Channel[]>).flat().find((channel) => channel.id === startupSnapshot.activeChannelId) || startupSnapshot.dms.find((channel) => channel.id === startupSnapshot.activeChannelId) || null
     : null;
@@ -457,8 +460,8 @@ export default function App() {
           hasMore: true,
           remoteHasMore: true,
           cachedPagesAvailable: 1,
-          newestCursor: cursorFromMessage(items?.[items.length - 1]),
-          oldestCursor: cursorFromMessage(items?.[0]),
+          newestCursor: getNewestCursor(items),
+          oldestCursor: getOldestCursor(items),
         }] as const;
       })
     )
@@ -467,6 +470,12 @@ export default function App() {
   const loadMessagesGenerationRef = useRef<Map<string, number>>(new Map());
   const loadChannelsGenerationRef = useRef<Map<string, number>>(new Map());
   const olderMessageRequestRef = useRef<Set<string>>(new Set());
+  const prefetchedOlderPagesRef = useRef<Record<string, {
+    items: Message[];
+    hasMore: boolean;
+    cursor: MessageCursor | null;
+  } | null>>({});
+  const prefetchingConversationsRef = useRef<Set<string>>(new Set());
   const previousMessageConversationRef = useRef<{ id: string; kind: 'channel' | 'dm' } | null>(null);
   const gatewayBootstrapRef = useRef<BootstrapResponse | null>(null);
   const gatewayBootstrapPromiseRef = useRef<Promise<BootstrapResponse | null> | null>(null);
@@ -1421,17 +1430,20 @@ export default function App() {
   useEffect(() => {
     if (activeServer) {
       localStorage.setItem('last_active_server_id', activeServer.id);
+      localStorage.setItem('last_active_conversation_type', 'server');
     }
   }, [activeServer?.id]);
 
   useEffect(() => {
-    if (activeServer && activeChannel) {
+    if (activeServer && activeChannel && activeChannel.type === 'text') {
       localStorage.setItem(`last_active_channel_id_${activeServer.id}`, activeChannel.id);
     }
     if (activeChannel) {
       const isDm = activeChannel.server === 'dm' || activeChannel.name.startsWith('@');
       if (isDm) {
         setActiveDmChannel(activeChannel);
+        localStorage.setItem('last_active_dm_id', activeChannel.id);
+        localStorage.setItem('last_active_conversation_type', 'dm');
       } else {
         setActiveServerChannel(activeChannel);
       }
@@ -2146,10 +2158,11 @@ export default function App() {
     // 1. Instantly display cached servers synchronously (0ms)
     if (currentUser?.id) {
       const syncServers = offlineCacheService.getServersSync(currentUser.id);
+      const isLastDm = localStorage.getItem('last_active_conversation_type') === 'dm' || activeChannelRef.current?.server === 'dm' || Boolean(activeChannelRef.current?.name?.startsWith('@'));
       if (syncServers && syncServers.length > 0) {
         hadCachedServers = true;
         setServers(syncServers);
-        if (!activeServerRef.current) {
+        if (!isLastDm && !activeServerRef.current) {
           const savedServerId = localStorage.getItem('last_active_server_id');
           const restoredServer = syncServers.find((s) => s.id === savedServerId) || syncServers[0];
           setActiveServer(restoredServer);
@@ -2162,7 +2175,7 @@ export default function App() {
           if (cachedServers && cachedServers.length > 0) {
             hadCachedServers = true;
             setServers(cachedServers);
-            if (!activeServerRef.current) {
+            if (!isLastDm && !activeServerRef.current) {
               const savedServerId = localStorage.getItem('last_active_server_id');
               const restoredServer = cachedServers.find((s) => s.id === savedServerId) || cachedServers[0];
               setActiveServer(restoredServer);
@@ -2231,7 +2244,8 @@ export default function App() {
       }
 
       if (list.length > 0) {
-        if (!activeServerRef.current) {
+        const isLastDm = localStorage.getItem('last_active_conversation_type') === 'dm' || activeChannelRef.current?.server === 'dm' || Boolean(activeChannelRef.current?.name?.startsWith('@'));
+        if (!isLastDm && !activeServerRef.current) {
           const savedServerId = localStorage.getItem('last_active_server_id');
           const restoredServer = list.find((s) => s.id === savedServerId) || list[0];
           setActiveServer(restoredServer);
@@ -2421,7 +2435,7 @@ export default function App() {
         ? channelId.slice('dm-server-'.length)
         : channelId;
       const cursor = append
-        ? (currentEntry?.oldestCursor || cursorFromMessage(currentEntry?.items?.[0]))
+        ? (currentEntry?.oldestCursor || getOldestCursor(currentEntry?.items))
         : null;
       try {
         if (append && activeChannelRef.current?.id === channelId) setIsLoadingMore(true);
@@ -2459,8 +2473,8 @@ export default function App() {
           hasMore: gatewayPage.hasMore,
           remoteHasMore: gatewayPage.hasMore,
           cachedPagesAvailable: Math.max(1, currentEntry?.cachedPagesAvailable || 0) + (append ? 1 : 0),
-          newestCursor: cursorFromMessage(mergedItems[mergedItems.length - 1]),
-          oldestCursor: cursorFromMessage(mergedItems[0]),
+          newestCursor: getNewestCursor(mergedItems),
+          oldestCursor: getOldestCursor(mergedItems),
         };
         messagesCache.current[channelId] = nextEntry;
         if (activeChannelRef.current?.id === channelId && requestIsCurrent()) {
@@ -2499,7 +2513,7 @@ export default function App() {
       let chatServerId = channelId.startsWith('dm-server-') ? channelId.replace(/^dm-server-/, '') : undefined;
       const cachedEntry = messagesCache.current[channelId];
       const cursor = append
-        ? (cachedEntry?.oldestCursor || cursorFromMessage(cachedEntry?.items?.[0]))
+        ? (cachedEntry?.oldestCursor || getOldestCursor(cachedEntry?.items))
         : null;
 
       try {
@@ -2547,8 +2561,8 @@ export default function App() {
           hasMore: remoteHasMore,
           remoteHasMore,
           cachedPagesAvailable: Math.max(1, cachedEntry?.cachedPagesAvailable || 0) + (append ? 1 : 0),
-          newestCursor: cursorFromMessage(mergedItems[mergedItems.length - 1]),
-          oldestCursor: cursorFromMessage(mergedItems[0]),
+          newestCursor: getNewestCursor(mergedItems),
+          oldestCursor: getOldestCursor(mergedItems),
         };
         messagesCache.current[channelId] = nextEntry;
         if (activeChannelRef.current?.id === channelId && requestIsCurrent()) {
@@ -2559,6 +2573,9 @@ export default function App() {
           setMessagesPage(pageNum);
         }
         offlineCacheService.enqueueMessagePersistence('dm', channelId, page, cursor, pageNum);
+        if (remoteHasMore) {
+          setTimeout(() => prefetchNextOlderPage(channelId, true), 100);
+        }
 
         if ((import.meta as any).env?.DEV) {
           console.log(`[PAGINATION_DEBUG] DM Channel: ${channelId} | cursor=${cursor ? `${cursor.created}/${cursor.id}` : 'initial'} | returned=${page.items.length} | hasMore=${page.hasMore}`);
@@ -2589,8 +2606,8 @@ export default function App() {
                 hasMore: remoteHasMore,
                 remoteHasMore,
                 cachedPagesAvailable: Math.max(1, cachedEntry?.cachedPagesAvailable || 0) + (append ? 1 : 0),
-                newestCursor: cursorFromMessage(mergedItems[mergedItems.length - 1]),
-                oldestCursor: cursorFromMessage(mergedItems[0]),
+                newestCursor: getNewestCursor(mergedItems),
+                oldestCursor: getOldestCursor(mergedItems),
               };
               messagesCache.current[channelId] = nextEntry;
               if (activeChannelRef.current?.id === channelId && requestIsCurrent()) {
@@ -2633,7 +2650,7 @@ export default function App() {
         // message in the active cache, so equal-timestamp rows are not skipped.
         const currentEntry = messagesCache.current[channelId];
         const currentDataset = currentEntry?.items || messages;
-        const oldestCursor = currentEntry?.oldestCursor || cursorFromMessage(currentDataset.find((m) => !m.id.startsWith('optimistic-')));
+        const oldestCursor = currentEntry?.oldestCursor || getOldestCursor(currentDataset);
         const page = await pbService.fetchMessagesPage(channelId, oldestCursor, requestLimit);
         if (!requestIsCurrent()) return;
 
@@ -2645,14 +2662,17 @@ export default function App() {
           hasMore: remoteHasMore,
           remoteHasMore,
           cachedPagesAvailable: (currentEntry?.cachedPagesAvailable || 0) + 1,
-          newestCursor: cursorFromMessage(mergedItems[mergedItems.length - 1]),
-          oldestCursor: cursorFromMessage(mergedItems[0]),
+          newestCursor: getNewestCursor(mergedItems),
+          oldestCursor: getOldestCursor(mergedItems),
         };
         if (activeChannelRef.current?.id === channelId) {
           setMessages((prev) => mergeOlderMessagePage(prev, page.items, MAX_ACTIVE_MESSAGES));
           setHasMoreMessages(remoteHasMore);
         }
         offlineCacheService.enqueueMessagePersistence('channel', channelId, page, oldestCursor, pageNum);
+        if (remoteHasMore) {
+          setTimeout(() => prefetchNextOlderPage(channelId, false), 100);
+        }
         if ((import.meta as any).env?.DEV) {
           console.log(`[PAGINATION_DEBUG] Appending channel cursor=${oldestCursor ? `${oldestCursor.created}/${oldestCursor.id}` : 'initial'} returned=${page.items.length} hasMore=${page.hasMore}`);
         }
@@ -2678,8 +2698,8 @@ export default function App() {
           hasMore: page.hasMore,
           remoteHasMore: page.hasMore,
           cachedPagesAvailable: Math.max(1, currentEntry?.cachedPagesAvailable || 0),
-          newestCursor: cursorFromMessage(mergedItems[mergedItems.length - 1]),
-          oldestCursor: cursorFromMessage(mergedItems[0]),
+          newestCursor: getNewestCursor(mergedItems),
+          oldestCursor: getOldestCursor(mergedItems),
         };
         messagesCache.current[channelId] = nextEntry;
         if (activeChannelRef.current?.id === channelId) {
@@ -2693,6 +2713,9 @@ export default function App() {
           null,
           1,
         );
+        if (page.hasMore) {
+          setTimeout(() => prefetchNextOlderPage(channelId, false), 100);
+        }
 
         if ((import.meta as any).env?.DEV) {
           console.log(`[PAGINATION_DEBUG] Initial channel page returned=${page.items.length} hasMore=${page.hasMore}`);
@@ -2709,7 +2732,7 @@ export default function App() {
             if (append) {
               const currentEntry = messagesCache.current[channelId];
               const currentDataset = currentEntry?.items || messages;
-              const oldestCursor = currentEntry?.oldestCursor || cursorFromMessage(currentDataset.find((m) => !m.id.startsWith('optimistic-')));
+              const oldestCursor = currentEntry?.oldestCursor || getOldestCursor(currentDataset);
               const retryPage = await pbService.fetchMessagesPage(channelId, oldestCursor, requestLimit, { timeoutMs: 20000 });
               if (!requestIsCurrent()) return;
 
@@ -2721,8 +2744,8 @@ export default function App() {
                 hasMore: remoteHasMore,
                 remoteHasMore,
                 cachedPagesAvailable: (currentEntry?.cachedPagesAvailable || 0) + 1,
-                newestCursor: cursorFromMessage(mergedItems[mergedItems.length - 1]),
-                oldestCursor: cursorFromMessage(mergedItems[0]),
+                newestCursor: getNewestCursor(mergedItems),
+                oldestCursor: getOldestCursor(mergedItems),
               };
               if (activeChannelRef.current?.id === channelId) {
                 setMessages((prev) => mergeOlderMessagePage(prev, retryPage.items, MAX_ACTIVE_MESSAGES));
@@ -2751,8 +2774,8 @@ export default function App() {
                 hasMore: retryPage.hasMore,
                 remoteHasMore: retryPage.hasMore,
                 cachedPagesAvailable: Math.max(1, currentEntry?.cachedPagesAvailable || 0),
-                newestCursor: cursorFromMessage(mergedItems[mergedItems.length - 1]),
-                oldestCursor: cursorFromMessage(mergedItems[0]),
+                newestCursor: getNewestCursor(mergedItems),
+                oldestCursor: getOldestCursor(mergedItems),
               };
               messagesCache.current[channelId] = nextEntry;
               if (activeChannelRef.current?.id === channelId) {
@@ -2787,6 +2810,90 @@ export default function App() {
     }
   };
 
+  const prefetchNextOlderPage = async (conversationId: string, isDm: boolean) => {
+    if (!conversationId) return;
+    if (prefetchedOlderPagesRef.current[conversationId]) return;
+    if (prefetchingConversationsRef.current.has(conversationId)) return;
+    const entry = messagesCache.current[conversationId];
+    if (entry && entry.remoteHasMore === false) return;
+    const kind = isDm ? 'dm' : 'channel';
+    const currentDataset = entry?.items || (activeChannelRef.current?.id === conversationId ? messages : []);
+    const oldestCursor = entry?.oldestCursor || getOldestCursor(currentDataset);
+    if (!oldestCursor) return;
+
+    prefetchingConversationsRef.current.add(conversationId);
+    try {
+      // 1. Check offline cache first (0 network latency)
+      const cachedPage = await offlineCacheService.getNextOlderMessagePage(kind, conversationId, oldestCursor);
+      if (cachedPage?.items?.length) {
+        prefetchedOlderPagesRef.current[conversationId] = {
+          items: cachedPage.items,
+          hasMore: cachedPage.hasMore,
+          cursor: oldestCursor,
+        };
+        return;
+      }
+
+      // 2. Proactively prefetch from remote in background so next scroll-up is instant
+      if (entry?.remoteHasMore !== false) {
+        let items: Message[] = [];
+        let hasMore = false;
+        let fetchedPage: any = null;
+        if (isDm) {
+          const targetChan = activeChannelRef.current?.id === conversationId ? activeChannelRef.current : allDmChannels.find((c) => c.id === conversationId);
+          const targetUsername = targetChan ? targetChan.name.replace(/^@/, '') : '';
+          let targetUser = targetChan?.recipientUser || (targetUsername ? allDmChannels.find((c) => c.recipientUser?.username?.toLowerCase() === targetUsername.toLowerCase())?.recipientUser : null);
+          if (!targetUser?.id && targetUsername) {
+            try {
+              const matchingUsers = await pbService.searchUsers(targetUsername);
+              targetUser = matchingUsers.find((u) => u.username.toLowerCase() === targetUsername.toLowerCase());
+            } catch {}
+          }
+          if (targetUser?.id) {
+            const cachedServer = pbService.getCachedPrivateChatServer(targetUser.id);
+            const res = await pbService.fetchDirectMessagesPage(
+              targetUser.id,
+              cachedServer?.id,
+              oldestCursor,
+              OLDER_MESSAGE_PAGE_SIZE,
+            );
+            fetchedPage = res;
+            items = res.items;
+            hasMore = res.hasMore;
+          }
+        } else {
+          const res = await pbService.fetchMessagesPage(
+            conversationId,
+            oldestCursor,
+            OLDER_MESSAGE_PAGE_SIZE,
+          );
+          fetchedPage = res;
+          items = res.items;
+          hasMore = res.hasMore;
+        }
+
+        if (items.length > 0 && fetchedPage) {
+          prefetchedOlderPagesRef.current[conversationId] = {
+            items,
+            hasMore,
+            cursor: oldestCursor,
+          };
+          offlineCacheService.enqueueMessagePersistence(
+            kind,
+            conversationId,
+            fetchedPage,
+            oldestCursor,
+            (entry?.page || 1) + 1,
+          );
+        }
+      }
+    } catch {
+      // Background prefetch errors are silent
+    } finally {
+      prefetchingConversationsRef.current.delete(conversationId);
+    }
+  };
+
   const handleLoadMoreMessages = async () => {
     if (!activeChannel || isLoadingMore) return;
     const conversationId = activeChannel.id;
@@ -2798,10 +2905,41 @@ export default function App() {
       const isDm = activeChannel.server === 'dm' || activeChannel.name.startsWith('@');
       const kind = isDm ? 'dm' : 'channel';
 
+      // FAST-PATH: WhatsApp-style Instant Load from in-memory prefetch buffer (0ms latency)
+      const prefetched = prefetchedOlderPagesRef.current[conversationId];
+      if (prefetched && prefetched.items?.length > 0) {
+        prefetchedOlderPagesRef.current[conversationId] = null;
+        const revealedItems = mergeOlderMessagePage(
+          messages,
+          prefetched.items,
+          MAX_ACTIVE_MESSAGES,
+        );
+        if (didMessageWindowMoveOlder(messages, revealedItems)) {
+          setMessages(revealedItems);
+          setHasMoreMessages(prefetched.hasMore);
+          const nextEntry = {
+            ...(entry || {}),
+            items: revealedItems,
+            page: (entry?.page || messagesPage) + 1,
+            hasMore: prefetched.hasMore,
+            remoteHasMore: prefetched.hasMore,
+            cachedPagesAvailable: Math.max(0, (entry?.cachedPagesAvailable || 1) - 1),
+            newestCursor: getNewestCursor(revealedItems),
+            oldestCursor: getOldestCursor(revealedItems),
+          };
+          messagesCache.current[conversationId] = nextEntry as any;
+          if (prefetched.hasMore) {
+            setTimeout(() => {
+              prefetchNextOlderPage(conversationId, isDm);
+            }, 60);
+          }
+          return;
+        }
+      }
+
       const persistedMetadata = await offlineCacheService.getMessageMetadata(kind, conversationId);
       const knownRemoteHasMore = entry?.remoteHasMore ?? persistedMetadata?.remoteHasMore;
-      const visibleOldest = messages.find((message) => !message.id.startsWith('optimistic-'));
-      const visibleOldestCursor = cursorFromMessage(visibleOldest);
+      const visibleOldestCursor = getOldestCursor(messages);
       const cachedPage = await offlineCacheService.getNextOlderMessagePage(
         kind,
         conversationId,
@@ -2827,8 +2965,8 @@ export default function App() {
             hasMore: knownRemoteHasMore !== false,
             remoteHasMore: knownRemoteHasMore,
             cachedPagesAvailable: 0,
-            newestCursor: cursorFromMessage(revealedItems[revealedItems.length - 1]),
-            oldestCursor: cursorFromMessage(revealedItems[0]),
+            newestCursor: getNewestCursor(revealedItems),
+            oldestCursor: getOldestCursor(revealedItems),
           };
           revealedEntry.items = revealedItems;
           revealedEntry.hasMore = cachedHasMore;
@@ -2836,9 +2974,14 @@ export default function App() {
             0,
             (revealedEntry.cachedPagesAvailable || persistedMetadata?.cachedPagesAvailable || 1) - 1,
           );
-          revealedEntry.newestCursor = cursorFromMessage(revealedItems[revealedItems.length - 1]);
-          revealedEntry.oldestCursor = cursorFromMessage(revealedItems[0]);
+          revealedEntry.newestCursor = getNewestCursor(revealedItems);
+          revealedEntry.oldestCursor = getOldestCursor(revealedItems);
           messagesCache.current[conversationId] = revealedEntry;
+          if (cachedHasMore) {
+            setTimeout(() => {
+              prefetchNextOlderPage(conversationId, isDm);
+            }, 60);
+          }
           return;
         }
       }
@@ -2850,6 +2993,9 @@ export default function App() {
 
       const nextPage = messagesPage + 1;
       await loadMessages(conversationId, nextPage, true, null, OLDER_MESSAGE_PAGE_SIZE);
+      setTimeout(() => {
+        prefetchNextOlderPage(conversationId, isDm);
+      }, 100);
     } finally {
       olderMessageRequestRef.current.delete(conversationId);
     }

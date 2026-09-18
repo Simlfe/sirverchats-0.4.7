@@ -1,7 +1,7 @@
 import { Channel, Message, Server, User } from '../types';
 
 const SNAPSHOT_KEY = 'sirver_last_session_v1';
-const MAX_SNAPSHOT_BYTES = 900_000;
+const MAX_SNAPSHOT_BYTES = 250_000;
 
 export interface SessionSnapshot {
   version: 1;
@@ -74,12 +74,12 @@ export function writeSessionSnapshot(update: Partial<SessionSnapshot>): void {
       savedAt: Date.now(),
     };
     // Keep the synchronous startup payload intentionally small. Full history is
-    // stored in IndexedDB; this snapshot only contains the newest 30 messages
-    // for the six most recently touched conversations.
+    // stored in IndexedDB; this snapshot only contains the newest 20 messages
+    // for the 2 most recently active conversations.
     const entries = Object.entries(next.newestMessages)
-      .map(([id, messages]) => [id, Array.isArray(messages) ? messages.slice(-30) : []] as const)
+      .map(([id, messages]) => [id, Array.isArray(messages) ? messages.slice(-20) : []] as const)
       .filter(([, messages]) => messages.length > 0)
-      .slice(-6);
+      .slice(-2);
     next.newestMessages = Object.fromEntries(entries);
     const serialized = JSON.stringify(next);
     if (serialized.length <= MAX_SNAPSHOT_BYTES) {

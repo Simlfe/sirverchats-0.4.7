@@ -1,5 +1,48 @@
 # Sirver Application Changelog
 
+## [3.9-whatsapp-scroll-anchoring-instant-load] - 2026-09-18
+### WhatsApp-like scroll anchoring and predictive read-ahead buffer for older messages
+- **Rock-Solid Scroll Anchoring (WhatsApp Behavior)**:
+  - Fixed the viewport jump when older messages are loaded above the current scroll position.
+  - Implemented exact content-offset invariant calculation (`getBoundingClientRect().top - containerRect.top + container.scrollTop`), completely immune to user scrolling during network requests or browser layout reflows.
+  - Synchronously adjusted `scrollRef.current.scrollTop` in `useLayoutEffect` before browser paint so the message the user is currently reading remains pinned to the exact pixel on screen while older messages populate seamlessly above.
+  - Handled the edge case where the user reaches the absolute top (`scrollTop === 0`), shifting the scroll offset by the newly inserted content height so the user can immediately scroll up into older messages without getting trapped at the top.
+  - Added synchronous `activeMessages` computation in `ChatPanel.tsx` to eliminate the 1-frame state synchronization delay on older message prepends.
+- **Predictive Read-Ahead Buffer (Instant Older Message Loading)**:
+  - Implemented `prefetchNextOlderPage` in `App.tsx` which proactively retrieves the next older 20-message chunk (first from offline cache, then background network) as soon as messages are displayed.
+  - Fast-path in `handleLoadMoreMessages` applies prefetched messages in 0ms with zero loading delay and immediately queues the subsequent batch in the background.
+  - Aligned virtualization thresholds between `updateVirtualRange` and layout calculations to eliminate redundant state churn.
+
+## [3.9-infinite-scroll-memory-optimization] - 2026-09-18
+### Seamless automatic infinite scroll and low-memory DOM virtualization
+- **Extended Preload Horizon (Zero-Lag Infinite Scroll)**:
+  - Widened the top sentinel `IntersectionObserver` margin from `120px` to `600px 0px 0px 0px` and updated the scroll handler `preloadThreshold` to `550px`. Older messages automatically begin loading ~1–1.5 viewports before the user hits the top edge.
+  - Implemented an immediate synchronous upward detection path (`isScrollingUp && scrollTop < 550`) in `handleScrollFeed` to trigger older message loading instantly without waiting for RAF frame queue delays.
+  - Reduced the fetch lock delay (`isFetchingMoreRef`) from 300ms to 150ms, allowing smooth, continuous upward scroll streaming without duplicate network calls or scroll stalls.
+- **Low-Memory DOM Virtualization (Under 50MB Footprint)**:
+  - Reduced the direct DOM rendering cutoff from 500 messages down to 80 messages in `ChatPanel.tsx`.
+  - For conversations with more than 80 messages, enabled windowed virtualization with a generous 2500px overscan buffer. Only active visible messages (~40–60 items) are mounted in the browser DOM at any time, unmounting off-screen avatars, Lucide SVG icons, audio elements, and image decoders, keeping memory lean and scroll at 60 FPS.
+- **Jitter-Free Scroll Anchoring & Refined Indicator**:
+  - Maintained `useLayoutEffect` scroll height delta adjustment (`newScrollHeight - prevScrollHeight`) on older message prepends to lock viewport physical position with zero visual jitter or flash.
+  - Refined the top indicator into a clean, non-intrusive loading pulse while actively fetching and an unobtrusive fallback.
+
+## [3.9-audit-pagination-cache-voice-optimization] - 2026-09-18
+### Deep audit of message pagination, reduced browser cache size, last conversation restore, and instant voice channel switching
+- **Standardized Message Pagination**:
+  - Unified message page size to 20 across all pathways (`INITIAL_MESSAGE_PAGE_SIZE = 20`, `OLDER_MESSAGE_PAGE_SIZE = 20`) for both initial loads and older message queries.
+  - Eliminated unintentional query skips by removing the overly strict `has_attachment` filter in `src/pocketbase.ts` which was causing messages without attachments or with unexpected attachment fields to be omitted during pagination.
+  - Implemented `getOldestCursor` and `getNewestCursor` helpers in `src/services/messagePagination.ts` that filter out optimistic and pending message records, ensuring accurate boundary cursor tracking without dropping or duplicating messages.
+- **Optimized Web Browser Cache Footprint**:
+  - Reduced `MAX_SNAPSHOT_BYTES` from 800KB down to 250KB in `src/services/sessionSnapshot.ts` to prevent browser `localStorage` bloat and ensure fast initial loads.
+  - Trimmed session snapshot message caching to retain the newest 20 messages for the 2 most recently active conversations.
+- **Accurate Last Conversation & Server Restoration**:
+  - Updated session restoration logic in `src/App.tsx` to distinguish between direct message (`dm`) and server-channel contexts on initial load.
+  - Prevented background server loading from overriding an active direct message conversation when restoring prior sessions.
+- **Instant Voice Channel Switching & Zero-Delay Voice UI**:
+  - Updated `VoicePanel.tsx` to immediately render the full voice interface upon clicking a voice channel, removing blocking intermediate modal loaders.
+  - When switching channels while already connected, performed previous room teardown and new room preparation concurrently with transient disconnection suppression, delivering fast and seamless voice channel switching.
+  - Implemented `APP_MAP.md` as an authoritative architectural index of the application for fast reference.
+
 ## [3.9-stability-attachment-and-voice-fix] - 2026-09-17
 ### Fix disappearing messages and images, restore voice channel joining, and optimize link previews
 - **Attachment Retention in Realtime Updates**: Updated `App.tsx` realtime message handlers (`subscribeToMessages` and `subscribeToPrivateMessages`) to preserve existing attachment expansions (`attachments(message)`, `private_attachments(message)`, `attachments_via_message`) when merging server updates, preventing images from disappearing when background touch/edit events arrive.

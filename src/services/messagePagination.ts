@@ -15,6 +15,23 @@ export function cursorFromMessage(message: Pick<Message, 'created' | 'id'> | nul
   return { created: message.created, id: message.id };
 }
 
+export function getOldestCursor(messages: Array<Pick<Message, 'created' | 'id'>> | null | undefined): MessageCursor | null {
+  if (!messages || messages.length === 0) return null;
+  const firstValid = messages.find((m) => m && m.id && !m.id.startsWith('optimistic-') && !(m as any).is_pending);
+  return cursorFromMessage(firstValid);
+}
+
+export function getNewestCursor(messages: Array<Pick<Message, 'created' | 'id'>> | null | undefined): MessageCursor | null {
+  if (!messages || messages.length === 0) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m && m.id && !m.id.startsWith('optimistic-') && !(m as any).is_pending) {
+      return cursorFromMessage(m);
+    }
+  }
+  return null;
+}
+
 export function cursorKey(cursor: MessageCursor | null | undefined): string {
   return cursor ? `${cursor.created}|${cursor.id}` : 'initial';
 }

@@ -279,6 +279,10 @@ export const MediaProvider: React.FC<{
         if (evt.type === 'participants_changed' && evt.participants) {
           setParticipants([...evt.participants]);
         } else if (evt.type === 'connection_changed' && evt.connectionState) {
+          if (joiningRoomIdRef.current && (evt.connectionState === 'leaving' || evt.connectionState === 'disconnected')) {
+            // A new room join or switch is in-flight; ignore transient teardown states from previous room
+            return;
+          }
           setConnectionState(evt.connectionState);
         } else if (evt.type === 'error' && evt.error) {
           setError(evt.error);
@@ -609,21 +613,22 @@ export const MediaProvider: React.FC<{
           if (previousRoom.callId) {
             callSignalingService.endCall(previousRoom.callId);
           }
-          try {
-            await realtimeMediaProvider.leaveRoom();
-          } catch (e) {
-            console.warn('Previous room teardown warning during channel switch:', e);
-          }
-          // Re-affirm the new channel config and connecting state in case leaveRoom fired events
-          setActiveRoom(config);
+          // Fast concurrent transition: tear down old room while preparing new room credentials
+          const [, prepared] = await Promise.all([
+            realtimeMediaProvider.leaveRoom().catch((e) => {
+              console.warn('Previous room teardown warning during channel switch:', e);
+            }),
+            prepareRoomJoin(config),
+          ]);
+          preparedConfig = prepared;
+          setActiveRoom(preparedConfig);
           setConnectionState('connecting');
           setParticipants([]);
+        } else {
+          preparedConfig = await prepareRoomJoin(config);
+          setActiveRoom(preparedConfig);
         }
 
-        // Microphone acquisition, lazy LiveKit loading and token acquisition
-        // begin together after the explicit Join click.
-        preparedConfig = await prepareRoomJoin(config);
-        setActiveRoom(preparedConfig);
         const parts = await realtimeMediaProvider.joinRoom(preparedConfig);
         mediaConnected = true;
         setParticipants(parts);

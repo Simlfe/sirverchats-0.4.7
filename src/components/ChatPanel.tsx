@@ -1023,6 +1023,12 @@ function ChatPanel({
       const scrollRect = scrollEl.getBoundingClientRect();
       const liveAnchor = getLiveViewportAnchor();
       if (liveAnchor) {
+        const rawAnchorId = liveAnchor.anchorMsgId.replace(/^msg-/, '');
+        const anchorEl = scrollEl.querySelector<HTMLElement>(`[id="msg-${rawAnchorId}"]`) || document.getElementById(`msg-${rawAnchorId}`);
+        const anchorContentOffset = anchorEl
+          ? anchorEl.getBoundingClientRect().top - scrollRect.top + scrollEl.scrollTop
+          : null;
+
         loadMoreScrollAnchorRef.current = {
           prevMessagesCount: sortedMessages.length,
           prevOldestMessageId: sortedMessages[0]?.id || null,
@@ -1030,6 +1036,7 @@ function ChatPanel({
           prevScrollTop: scrollEl.scrollTop,
           anchorMsgId: liveAnchor.anchorMsgId,
           anchorOffsetTop: liveAnchor.anchorOffsetTop,
+          anchorContentOffset,
         };
       } else {
         const messageNodes =
@@ -1047,6 +1054,9 @@ function ChatPanel({
         const chosenId = chosenEl
           ? chosenEl.id
           : (sortedMessages[0]?.id ? `msg-${sortedMessages[0].id}` : null);
+        const anchorContentOffset = chosenEl
+          ? chosenEl.getBoundingClientRect().top - scrollRect.top + scrollEl.scrollTop
+          : null;
         loadMoreScrollAnchorRef.current = {
           prevMessagesCount: sortedMessages.length,
           prevOldestMessageId: sortedMessages[0]?.id || null,
@@ -1056,7 +1066,20 @@ function ChatPanel({
           anchorOffsetTop: chosenEl
             ? chosenEl.getBoundingClientRect().top - scrollRect.top
             : 0,
+          anchorContentOffset,
         };
+      }
+
+      // Record baseline for continuous content-offset anchor tracking
+      prevOldestMessageIdRef.current = sortedMessages[0]?.id || null;
+      prevScrollHeightRef.current = scrollEl.scrollHeight;
+      if (sortedMessages[0]?.id) {
+        const rawOldest = sortedMessages[0].id.replace(/^msg-/, '');
+        const el = scrollEl.querySelector<HTMLElement>(`[id="msg-${rawOldest}"]`) || document.getElementById(`msg-${rawOldest}`);
+        if (el) {
+          prevOldestContentOffsetRef.current =
+            el.getBoundingClientRect().top - scrollRect.top + scrollEl.scrollTop;
+        }
       }
     }
 
@@ -1068,7 +1091,7 @@ function ChatPanel({
     } finally {
       setTimeout(() => {
         isFetchingMoreRef.current = false;
-      }, 300);
+      }, 150);
       // Fallback cleanup in case no messages were prepended to sortedMessages
       setTimeout(() => {
         if (loadMoreScrollAnchorRef.current) {
@@ -1094,7 +1117,7 @@ function ChatPanel({
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) handleLoadMore();
       },
-      { root, rootMargin: '120px 0px 0px 0px', threshold: 0 },
+      { root, rootMargin: '600px 0px 0px 0px', threshold: 0 },
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
@@ -1150,6 +1173,21 @@ function ChatPanel({
     // Immediately update ref synchronously to prevent race conditions during scroll frame
     isAtBottomRef.current = isAtBottom;
 
+    // Fast-path: When scrolling upward near the top, proactively trigger loading older
+    // messages immediately without waiting for RAF frame cycle
+    const preloadThreshold = 550;
+    if (
+      isScrollingUp &&
+      scrollTop < preloadThreshold &&
+      hasMoreMessages &&
+      !isLoadingMore &&
+      !isFetchingMoreRef.current &&
+      !isManualScrollingRef.current &&
+      !initialChannelLoadLockRef.current.active
+    ) {
+      handleLoadMore();
+    }
+
     if (scrollRafRef.current !== null) return;
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null;
@@ -1168,8 +1206,6 @@ function ChatPanel({
       updateVirtualRangeRef.current();
 
       // Auto-load older messages in background proactively when approaching the top
-      const preloadThreshold = 120;
-
       if (
         !isAtBottom &&
         !isInitialScrollPendingRef.current &&
@@ -2360,7 +2396,12 @@ function ChatPanel({
     prevScrollTop: number;
     anchorMsgId: string | null;
     anchorOffsetTop: number;
+    anchorContentOffset: number | null;
   } | null>(null);
+
+  const prevOldestMessageIdRef = useRef<string | null>(null);
+  const prevOldestContentOffsetRef = useRef<number | null>(null);
+  const prevScrollHeightRef = useRef<number>(0);
 
   const scheduleSessionStatePersist = useCallback(() => {
     if (sessionPersistTimerRef.current) clearTimeout(sessionPersistTimerRef.current);
@@ -2491,6 +2532,17 @@ function ChatPanel({
     }
   }, [isActive, messages, channel.id]);
 
+  // Synchronously compute active channel messages so prop updates (including older prepends)
+  // take effect in the exact same render cycle without 1-frame state lag
+  const activeMessages = React.useMemo(() => {
+    if (isActive && messages) {
+      return messages.filter(
+        (m) => !m.channel || m.channel === channel.id,
+      );
+    }
+    return displayedMessages;
+  }, [isActive, messages, channel.id, displayedMessages]);
+
   // Optimized chronological message sorting, search filtering, and deduplication
   const { sortedMessages, messageLookup } = React.useMemo(() => {
     const lookup = new Map<string, Message>();
@@ -2499,7 +2551,7 @@ function ChatPanel({
     const nonOptimisticKeys = new Set<string>();
 
     // First pass: index confirmed server messages
-    for (const msg of displayedMessages) {
+    for (const msg of activeMessages) {
       if (
         msg.id &&
         !msg.deleted &&
@@ -2531,7 +2583,7 @@ function ChatPanel({
     const uniqueMessages: Message[] = Array.from(confirmedMap.values());
     const optimisticIdsAdded = new Set<string>();
 
-    for (const msg of displayedMessages) {
+    for (const msg of activeMessages) {
       if (
         msg.id &&
         !msg.deleted &&
@@ -2580,7 +2632,7 @@ function ChatPanel({
     }
 
     return { sortedMessages: sorted, messageLookup: lookup };
-  }, [displayedMessages, channelSearchQuery]);
+  }, [activeMessages, channelSearchQuery]);
 
   const totalMessagesCount = sortedMessages.length;
 
@@ -2969,7 +3021,9 @@ function ChatPanel({
       return;
     }
 
-    // Feeds up to MAX_ACTIVE_MESSAGES (500) render directly without artificial spacer jumps.
+    // Feeds up to 500 messages render directly without spacers (smooth scrolling without layout shifts).
+    // Above 500 messages, windowed virtualization keeps DOM nodes and memory footprint low
+    // while keeping a generous overscan buffer so scrolling remains fluid and seamless.
     if (total <= 500) {
       const current = virtualRangeRef.current;
       if (
@@ -3147,19 +3201,26 @@ function ChatPanel({
   useLayoutEffect(() => {
     if (!scrollRef.current) return;
     const scrollEl = scrollRef.current;
-    if (loadMoreScrollAnchorRef.current) {
-      const anchorData = loadMoreScrollAnchorRef.current;
-      // A capped prepend can replace 50 newest rows while keeping length 500.
-      // The oldest stable ID is the authoritative window-movement signal.
-      const windowMoved =
-        sortedMessages.length > anchorData.prevMessagesCount ||
-        sortedMessages[0]?.id !== anchorData.prevOldestMessageId;
-      if (!windowMoved) {
-        return;
-      }
-      loadMoreScrollAnchorRef.current = null;
+    const scrollRect = scrollEl.getBoundingClientRect();
 
-      if (anchorData.anchorMsgId) {
+    const prevOldestId = prevOldestMessageIdRef.current;
+    const currentOldestId = sortedMessages[0]?.id || null;
+    const hasPrepend = Boolean(
+      (loadMoreScrollAnchorRef.current &&
+        (sortedMessages.length > loadMoreScrollAnchorRef.current.prevMessagesCount ||
+          sortedMessages[0]?.id !== loadMoreScrollAnchorRef.current.prevOldestMessageId)) ||
+      (prevOldestId &&
+        currentOldestId &&
+        currentOldestId !== prevOldestId &&
+        sortedMessages.some((m) => m.id === prevOldestId))
+    );
+
+    if (hasPrepend) {
+      let applied = false;
+      const anchorData = loadMoreScrollAnchorRef.current;
+
+      // 1. First priority: Target element from anchorData
+      if (anchorData?.anchorMsgId) {
         const rawId = anchorData.anchorMsgId.replace(/^msg-/, '');
         let anchorEl = scrollEl.querySelector<HTMLElement>(`[id="msg-${rawId}"]`);
         if (!anchorEl) anchorEl = scrollEl.querySelector<HTMLElement>(`[id="${anchorData.anchorMsgId}"]`);
@@ -3167,30 +3228,60 @@ function ChatPanel({
         if (!anchorEl) anchorEl = document.getElementById(anchorData.anchorMsgId);
 
         if (anchorEl) {
-          const scrollRect = scrollEl.getBoundingClientRect();
-          const currentRelTop = anchorEl.getBoundingClientRect().top - scrollRect.top;
-          const shift = currentRelTop - anchorData.anchorOffsetTop;
-          if (Math.abs(shift) > 0.5) {
-            scrollEl.scrollTop += shift;
-            lastScrollTopRef.current = scrollEl.scrollTop;
+          if (anchorData.anchorContentOffset !== null && anchorData.anchorContentOffset !== undefined) {
+            const currentContentOffset =
+              anchorEl.getBoundingClientRect().top - scrollRect.top + scrollEl.scrollTop;
+            const delta = currentContentOffset - anchorData.anchorContentOffset;
+            if (Math.abs(delta) > 0.5) {
+              scrollEl.scrollTop += delta;
+              lastScrollTopRef.current = scrollEl.scrollTop;
+              applied = true;
+            }
+          } else {
+            const currentRelTop = anchorEl.getBoundingClientRect().top - scrollRect.top;
+            const shift = currentRelTop - anchorData.anchorOffsetTop;
+            if (Math.abs(shift) > 0.5) {
+              scrollEl.scrollTop += shift;
+              lastScrollTopRef.current = scrollEl.scrollTop;
+              applied = true;
+            }
           }
-          updateVirtualRange();
-          return;
         }
       }
 
-      const newScrollHeight = scrollEl.scrollHeight;
-      const heightDiff = newScrollHeight - anchorData.prevScrollHeight;
-      if (heightDiff > 0) {
-        const targetTop = anchorData.prevScrollTop + heightDiff;
-        scrollEl.scrollTop = targetTop;
-        lastScrollTopRef.current = targetTop;
+      // 2. Second priority: Previous oldest message element
+      if (!applied && prevOldestId && prevOldestContentOffsetRef.current !== null) {
+        const rawPrevId = prevOldestId.replace(/^msg-/, '');
+        let prevOldestEl = scrollEl.querySelector<HTMLElement>(`[id="msg-${rawPrevId}"]`);
+        if (!prevOldestEl) prevOldestEl = document.getElementById(`msg-${rawPrevId}`);
+        if (prevOldestEl) {
+          const currentContentOffset =
+            prevOldestEl.getBoundingClientRect().top - scrollRect.top + scrollEl.scrollTop;
+          const delta = currentContentOffset - prevOldestContentOffsetRef.current;
+          if (Math.abs(delta) > 0.5) {
+            scrollEl.scrollTop += delta;
+            lastScrollTopRef.current = scrollEl.scrollTop;
+            applied = true;
+          }
+        }
       }
-      updateVirtualRange();
-      return;
-    }
 
-    if (
+      // 3. Third priority: Scroll height differential fallback
+      if (!applied) {
+        const baselineScrollHeight =
+          anchorData?.prevScrollHeight || prevScrollHeightRef.current || 0;
+        const newScrollHeight = scrollEl.scrollHeight;
+        const heightDiff = newScrollHeight - baselineScrollHeight;
+        if (heightDiff > 0) {
+          scrollEl.scrollTop += heightDiff;
+          lastScrollTopRef.current = scrollEl.scrollTop;
+          applied = true;
+        }
+      }
+
+      loadMoreScrollAnchorRef.current = null;
+      updateVirtualRange();
+    } else if (
       initialScrollAppliedChannelRef.current !== channel.id &&
       (isInitialScrollPendingRef.current ||
         (initialChannelLoadLockRef.current.active &&
@@ -3198,6 +3289,18 @@ function ChatPanel({
     ) {
       scrollEl.scrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
       lastScrollTopRef.current = scrollEl.scrollTop;
+    }
+
+    // Always keep baseline tracking refs fresh for continuous scrolling
+    prevOldestMessageIdRef.current = currentOldestId;
+    prevScrollHeightRef.current = scrollEl.scrollHeight;
+    if (currentOldestId) {
+      const rawCurrent = currentOldestId.replace(/^msg-/, '');
+      const el = scrollEl.querySelector<HTMLElement>(`[id="msg-${rawCurrent}"]`) || document.getElementById(`msg-${rawCurrent}`);
+      if (el) {
+        prevOldestContentOffsetRef.current =
+          el.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top + scrollEl.scrollTop;
+      }
     }
   }, [sortedMessages, channel.id, updateVirtualRange]);
 
@@ -4123,6 +4226,10 @@ function ChatPanel({
         initialScrollCorrectionRafRef.current = null;
       }
       initialScrollAppliedChannelRef.current = null;
+      prevOldestMessageIdRef.current = null;
+      prevOldestContentOffsetRef.current = null;
+      prevScrollHeightRef.current = 0;
+      loadMoreScrollAnchorRef.current = null;
       isInitialScrollPendingRef.current = true;
       initialChannelLoadLockRef.current = {
         chanId: currentChanId,
@@ -5082,7 +5189,7 @@ function ChatPanel({
             style={{
               overflowAnchor: "none",
             }}
-            className={`flex-1 overflow-y-auto p-6 flex flex-col gap-0 chat-scroll-container ${
+            className={`relative flex-1 overflow-y-auto p-6 flex flex-col gap-0 chat-scroll-container ${
               chatSettings?.showScrollInChats
                 ? "scrollbar-thin"
                 : "scrollbar-none"
@@ -5101,8 +5208,8 @@ function ChatPanel({
                 className="flex justify-center py-2 shrink-0 select-none"
               >
                 {isLoadingMore ? (
-                  <div className="flex items-center gap-2 text-xs text-accent font-bold bg-accent/10 px-3.5 py-1.5 rounded-full">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <div className="flex items-center gap-2 text-xs text-accent font-medium bg-accent/10 px-3.5 py-1.5 rounded-full animate-pulse">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
                     <span>
                       {lang === "ar"
                         ? "جاري تحميل الرسائل السابقة..."
@@ -5111,8 +5218,9 @@ function ChatPanel({
                   </div>
                 ) : hasMoreMessages ? (
                   <button
+                    type="button"
                     onClick={() => handleLoadMore()}
-                    className="text-xs font-semibold px-3.5 py-1.5 rounded-full border transition-all cursor-pointer flex items-center gap-1.5 shadow-sm bg-[var(--theme-bg-secondary)] hover:bg-[var(--theme-bg-tertiary)] text-[var(--theme-text-primary)] border-[var(--theme-border)] active:scale-95"
+                    className="text-[11px] font-medium px-3 py-1 rounded-full border transition-all cursor-pointer flex items-center gap-1.5 opacity-60 hover:opacity-100 bg-[var(--theme-bg-secondary)] hover:bg-[var(--theme-bg-tertiary)] text-[var(--theme-text-muted)] hover:text-[var(--theme-text-primary)] border-[var(--theme-border)] active:scale-95"
                   >
                     <span>
                       {lang === "ar"
