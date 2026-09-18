@@ -46,7 +46,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
-      - run: npm ci --no-audit --no-fund
+      - run: npm install --no-audit --no-fund
       - name: Make native Gradle launcher executable
         run: chmod +x src-tauri/gen/android/gradlew
       - name: Build installable Tauri debug APK (ARM64 and ARMv7)
