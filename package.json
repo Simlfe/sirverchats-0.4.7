@@ -12,9 +12,9 @@
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "tauri": "tauri",
-    "build:windows": "tauri build",
+    "build:windows": "tauri build --bundles nsis",
     "build:windows:dir": "tauri build --no-bundle",
-    "build:linux": "tauri build",
+    "build:linux": "tauri build --bundles deb,appimage",
     "build:linux:dir": "tauri build --no-bundle",
     "build:arch": "bash ./arch/build-arch.sh",
     "build:android": "node scripts/build-android.mjs debug",
@@ -60,5 +60,8 @@
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
+  },
+  "optionalDependencies": {
+    "lightningcss-win32-x64-msvc": "^1.33.0"
   }
 }
