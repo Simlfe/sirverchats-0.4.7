@@ -1,5 +1,18 @@
 # Sirver Application Changelog
 
+## [3.9-smooth-server-list-animation] - 2026-09-18
+### Smooth open and close animations for server list switcher and mobile navigation drawers
+- **Fluid Server Switcher Dropdown (`src/components/ChannelList.tsx`)**:
+  - Implemented smooth spring-like open and close cubic-bezier animations (`[0.16, 1, 0.3, 1]`, duration: 0.24s) with subtle Y-axis elevation and scale easing (`scale: 0.96 -> 1.0 -> 0.96`).
+  - Added graceful backdrop fade-in and fade-out transition via `AnimatePresence` with `duration: 0.22s, ease: 'easeOut'`, preventing jarring instant dismissals on click-away.
+  - Added staggered micro-entrances for individual server items (`duration: 0.2s, delay: min(index * 0.03, 0.18s)`) and action controls for a polished cascading visual appearance.
+  - Refined trigger button Chevron rotation with a 300ms cubic-bezier transition and accent highlight when open.
+- **Fluid Mobile Navigation Drawer (`src/App.tsx`, `src/components/ChatPanel.tsx`)**:
+  - Upgraded mobile drawer open and close slide transitions to use consistent native-feel physics curves (`duration: 0.32s, ease: [0.32, 0.72, 0, 1]`) for both entrance and exit, eliminating abrupt closure snapping.
+  - Aligned mobile drawer backdrop fade transition to `0.28s, ease: 'easeOut'`.
+  - Added smooth 300ms rotation transition on mobile chat header Menu button when active.
+
+
 ## [3.9-seamless-infinite-scroll-zero-flicker] - 2026-09-18
 ### Optimized older message loading with seamless background infinite scroll and zero-flicker scroll anchoring
 - **Optimized Loading Latency & Bottlenecks**:

@@ -5047,7 +5047,7 @@ function ChatPanel({
                 lang === "ar" ? "القنوات والتنقل" : "Channels & Navigation"
               }
             >
-              <Menu className="w-4 h-4 text-accent" />
+              <Menu className={`w-4 h-4 text-accent transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${activeOverlay === "channels" ? "rotate-90 scale-105" : ""}`} />
               <span className="text-[10px] font-black uppercase tracking-wider hidden xs:inline">
                 {lang === "ar" ? "السيرفرات" : "Servers"}
               </span>

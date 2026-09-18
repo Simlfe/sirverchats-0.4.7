@@ -547,13 +547,20 @@ function ChannelList({
         {/* Workspace Dropdown Trigger */}
         <div className="relative flex-1 min-w-0" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
           {/* Backdrop overlay to close dropdown on click outside */}
-          {showServerDropdown && (
-            <div
-              className="fixed inset-0 z-40 bg-transparent"
-              onClick={() => setShowServerDropdown(false)}
-              aria-hidden="true"
-            />
-          )}
+          <AnimatePresence>
+            {showServerDropdown && (
+              <motion.div
+                key="server-dropdown-backdrop"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.22, ease: 'easeOut' }}
+                className="fixed inset-0 z-40 bg-black/20"
+                onClick={() => setShowServerDropdown(false)}
+                aria-hidden="true"
+              />
+            )}
+          </AnimatePresence>
 
           <button
             onClick={() => setShowServerDropdown((prev) => !prev)}
@@ -626,18 +633,19 @@ function ChannelList({
               </div>
             </div>
 
-            <ChevronDown className={`w-4 h-4 text-[var(--theme-text-secondary)] transition-transform duration-200 relative z-10 shrink-0 ${showServerDropdown ? 'rotate-180' : ''}`} />
+            <ChevronDown className={`w-4 h-4 text-[var(--theme-text-secondary)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] relative z-10 shrink-0 ${showServerDropdown ? 'rotate-180 text-accent' : 'group-hover:text-[var(--theme-text-primary)]'}`} />
           </button>
 
           {/* Server Switcher Dropdown */}
           <AnimatePresence>
             {showServerDropdown && (
               <motion.div
-                initial={{ opacity: 0, y: -6, scale: 0.98 }}
+                key="server-switcher-dropdown"
+                initial={{ opacity: 0, y: -10, scale: 0.96 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -4, scale: 0.98 }}
-                transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
-                style={{ willChange: 'transform, opacity' }}
+                exit={{ opacity: 0, y: -8, scale: 0.96 }}
+                transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+                style={{ willChange: 'transform, opacity', transformOrigin: 'top center' }}
                 className="absolute left-0 right-0 top-full mt-2 rounded-2xl shadow-2xl border p-2 z-50 flex flex-col gap-1 bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)]"
                 dir={lang === 'ar' ? 'rtl' : 'ltr'}
               >
@@ -646,27 +654,42 @@ function ChannelList({
                 </div>
 
                 <div className="max-h-72 overflow-y-auto space-y-2.5 p-1 scrollbar-thin">
-                  {servers.map((s) => {
+                  {servers.map((s, index) => {
                     const isSelected = activeServer?.id === s.id;
                     const serverUnreads = !isSelected ? (serverUnreadCountsMap.get(s.id) || 0) : 0;
                     const bannerUrl = getServerBannerUrl(s);
                     const iconUrl = s.icon ? getServerIconUrl(s) : '';
                     return (
-                      <ServerDropdownItem
+                      <motion.div
                         key={s.id}
-                        server={s}
-                        isSelected={isSelected}
-                        unreadCount={serverUnreads}
-                        bannerUrl={bannerUrl}
-                        iconUrl={iconUrl}
-                        onSelect={handleSelectServerItem}
-                        lang={lang}
-                      />
+                        initial={{ opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{
+                          duration: 0.2,
+                          delay: Math.min(index * 0.03, 0.18),
+                          ease: [0.16, 1, 0.3, 1],
+                        }}
+                      >
+                        <ServerDropdownItem
+                          server={s}
+                          isSelected={isSelected}
+                          unreadCount={serverUnreads}
+                          bannerUrl={bannerUrl}
+                          iconUrl={iconUrl}
+                          onSelect={handleSelectServerItem}
+                          lang={lang}
+                        />
+                      </motion.div>
                     );
                   })}
                 </div>
 
-                <div className="pt-1.5 flex flex-col gap-1">
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 0.2, delay: 0.08, ease: [0.16, 1, 0.3, 1] }}
+                  className="pt-1.5 flex flex-col gap-1"
+                >
                   {activeServer && onOpenServerSettings && (
                     <button
                       onClick={() => {
@@ -729,7 +752,7 @@ function ChannelList({
                     <Plus className="w-4 h-4" />
                     <span>{t('create_server')}</span>
                   </button>
-                </div>
+                </motion.div>
               </motion.div>
             )}
           </AnimatePresence>

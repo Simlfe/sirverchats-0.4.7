@@ -4702,7 +4702,7 @@ export default function App() {
                     initial={{ opacity: 0 }}
                     animate={{ opacity: sidebarDragState.isDragging ? sidebarDragState.opacity : 1 }}
                     exit={{ opacity: 0 }}
-                    transition={{ duration: sidebarDragState.isDragging ? 0 : 0.22, ease: 'easeOut' }}
+                    transition={{ duration: sidebarDragState.isDragging ? 0 : 0.28, ease: 'easeOut' }}
                     onClick={handleCloseSidebar}
                     className="fixed inset-0 bg-black/60 z-[70] md:hidden pointer-events-auto"
                   />
@@ -4718,8 +4718,8 @@ export default function App() {
                       transform: `translate3d(${lang === 'ar' ? '100%' : '-100%'}, 0px, 0px)`,
                     }}
                     transition={{
-                      duration: sidebarDragState.isDragging ? 0 : (isSidebarOpen ? 0.25 : 0.20),
-                      ease: sidebarDragState.isDragging ? 'linear' : (isSidebarOpen ? [0.16, 1, 0.3, 1] : [0.4, 0, 0.2, 1]),
+                      duration: sidebarDragState.isDragging ? 0 : 0.32,
+                      ease: sidebarDragState.isDragging ? 'linear' : [0.32, 0.72, 0, 1],
                     }}
                     style={{ willChange: 'transform' }}
                     onClick={(e) => e.stopPropagation()}
