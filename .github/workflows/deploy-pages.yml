@@ -1,6 +1,8 @@
 name: Deploy web app to Cloudflare Pages
 
 on:
+  push:
+    branches: [main, master]
   workflow_dispatch:
     inputs:
       enable_api_v2:
@@ -19,7 +21,7 @@ jobs:
       # The production gateway is now healthy and provides the single
       # authenticated bootstrap/message read path. Keep the URL explicit so a
       # Pages build cannot accidentally fall back to a stale preview host.
-      VITE_ENABLE_API_V2_BOOTSTRAP: ${{ inputs.enable_api_v2 }}
+      VITE_ENABLE_API_V2_BOOTSTRAP: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_api_v2 || false }}
       VITE_API_V2_URL: https://chat.sirverdata.top/api/v2
     steps:
       - name: Checkout repository
