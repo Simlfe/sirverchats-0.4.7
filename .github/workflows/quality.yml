@@ -15,8 +15,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-      - run: npm ci --no-audit --no-fund
+      - run: if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
       - run: npm run lint
       - run: npm test
       - run: npm run build
@@ -31,7 +30,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -52,7 +50,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
-      - run: npm ci --no-audit --no-fund
+      - run: if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
       - run: chmod +x src-tauri/gen/android/gradlew
       - name: Compile shared Tauri Android app
         env:
@@ -72,8 +70,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - uses: dtolnay/rust-toolchain@stable
-      - run: npm ci --no-audit --no-fund
+      - run: if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
       - run: npm run build
       - run: npx tauri build --ci --no-sign --bundles appimage,deb
