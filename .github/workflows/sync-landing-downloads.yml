@@ -8,14 +8,20 @@ on:
       - Build and Deploy Linux App
     types: [completed]
     branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Commit SHA whose successful build artifacts should be published
+        required: true
+        type: string
 
 concurrency:
-  group: landing-downloads-${{ github.event.workflow_run.head_sha }}
+  group: landing-downloads-${{ github.event.workflow_run.head_sha || inputs.source_sha }}
   cancel-in-progress: false
 
 jobs:
   sync:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: [self-hosted, linux, landing]
     permissions:
       actions: read
@@ -24,7 +30,7 @@ jobs:
       - name: Checkout built revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.workflow_run.head_sha || inputs.source_sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -35,16 +41,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.source_sha }}
           LANDING_DOWNLOADS_DIR: ${{ runner.temp }}/sirverdata-downloads
         run: node scripts/sync-landing-artifacts.mjs
 
       - name: Install downloads into the landing server
         run: |
-          sudo rm -rf /var/www/html/downloads
-          sudo install -d -m 0755 /var/www/html/downloads
-          sudo cp -a "${RUNNER_TEMP}/sirverdata-downloads/." /var/www/html/downloads/
-          sudo chown -R root:root /var/www/html/downloads
+          rm -rf /var/www/html/downloads
+          install -d -m 0755 /var/www/html/downloads
+          cp -a "${RUNNER_TEMP}/sirverdata-downloads/." /var/www/html/downloads/
 
       - name: Verify download manifest
         run: curl --fail --retry 3 --retry-all-errors https://sirverdata.top/downloads/manifest.json
