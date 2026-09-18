@@ -782,11 +782,19 @@ function ChatPanel({
   // message row visibly jump.  Keep a per-conversation marker so richer
   // realtime/cache records never re-run the initial scroll.
   const initialScrollAppliedChannelRef = useRef<string | null>(null);
+  const messagesScrolledForChannelRef = useRef<string | null>(null);
+  const initialSettleActiveRef = useRef<boolean>(false);
+  const initialSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bottomAnchorRef = useRef<HTMLDivElement>(null);
   const initialScrollCorrectionRafRef = useRef<number | null>(null);
   useEffect(() => () => {
     if (initialScrollCorrectionRafRef.current !== null) {
       cancelAnimationFrame(initialScrollCorrectionRafRef.current);
       initialScrollCorrectionRafRef.current = null;
+    }
+    if (initialSettleTimerRef.current !== null) {
+      clearTimeout(initialSettleTimerRef.current);
+      initialSettleTimerRef.current = null;
     }
   }, []);
   const panelResizeAnchorRef = useRef<{
@@ -938,34 +946,51 @@ function ChatPanel({
 
       applyInitialScroll();
       setIsInitialLoadReady(true);
-      // Release the initial lock immediately.  A single guarded correction in
-      // the next frame handles a scrollbar/layout measurement that changed
-      // during this paint, without repeatedly writing scrollTop on every
-      // message/profile/media update.
+
+      // Keep settle lock active for 400ms so dynamic image/media/layout changes don't push off bottom
       if (initialChannelLoadLockRef.current.chanId === channelIdAtStart) {
-        initialChannelLoadLockRef.current.active = false;
+        initialChannelLoadLockRef.current.active = true;
       }
-      initialScrollCorrectionRafRef.current = requestAnimationFrame(() => {
-        initialScrollCorrectionRafRef.current = null;
+      initialSettleActiveRef.current = true;
+      if (initialSettleTimerRef.current) {
+        clearTimeout(initialSettleTimerRef.current);
+      }
+      initialSettleTimerRef.current = setTimeout(() => {
+        initialSettleActiveRef.current = false;
+        if (initialChannelLoadLockRef.current.chanId === channelIdAtStart) {
+          initialChannelLoadLockRef.current.active = false;
+        }
+      }, 400);
+
+      const enforceBottomAlignment = () => {
         if (
+          !scrollRef.current ||
           prevChannelIdRef.current !== channelIdAtStart ||
           isManualScrollingRef.current ||
-          initialScrollAppliedChannelRef.current !== channelIdAtStart
+          !isAtBottomRef.current
         ) {
           return;
         }
         const scrollEl = scrollRef.current;
-        if (!scrollEl || !isAtBottomRef.current) return;
         const maxScrollTop = Math.max(
           0,
           scrollEl.scrollHeight - scrollEl.clientHeight,
         );
-        // Only correct a real layout delta.  Assigning the same value is
-        // avoided because WebViews can emit a synthetic scroll event for it.
         if (Math.abs(scrollEl.scrollTop - maxScrollTop) > 1) {
           scrollEl.scrollTop = maxScrollTop;
           lastScrollTopRef.current = maxScrollTop;
         }
+      };
+
+      initialScrollCorrectionRafRef.current = requestAnimationFrame(() => {
+        initialScrollCorrectionRafRef.current = null;
+        enforceBottomAlignment();
+        requestAnimationFrame(() => {
+          enforceBottomAlignment();
+          setTimeout(enforceBottomAlignment, 100);
+          setTimeout(enforceBottomAlignment, 250);
+          setTimeout(enforceBottomAlignment, 400);
+        });
       });
       return;
     }
@@ -978,9 +1003,14 @@ function ChatPanel({
     }
 
     if (source === "mediaLoad") {
-      // Media previews use reserved aspect-ratio boxes. Their decode/load
-      // lifecycle must never move the conversation; doing so was the source
-      // of repeated feed jumps while several previews completed together.
+      // If user is currently at the bottom (or in settle window), keep them at the bottom as media loads
+      if (
+        (isAtBottomRef.current || initialSettleActiveRef.current) &&
+        !isManualScrollingRef.current
+      ) {
+        scrollEl.scrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+        lastScrollTopRef.current = scrollEl.scrollTop;
+      }
       return;
     }
 
@@ -1001,7 +1031,11 @@ function ChatPanel({
 
   useEffect(() => {
     itemHeightsRef.current.clear();
-    virtualRangeRef.current = { startIndex: 0, endIndex: 120 };
+    const count = sortedMessages.length;
+    virtualRangeRef.current = {
+      startIndex: Math.max(0, count - 40),
+      endIndex: Math.max(0, count - 1),
+    };
   }, [channel.id]);
 
   const handleLoadMore = React.useCallback(async () => {
@@ -1132,15 +1166,6 @@ function ChatPanel({
     const scrollEl = scrollRef.current;
     if (!scrollEl) return;
 
-    if (
-      initialChannelLoadLockRef.current.active &&
-      initialChannelLoadLockRef.current.chanId === channel.id
-    ) {
-      isAtBottomRef.current = true;
-      lastScrollTopRef.current = scrollEl.scrollTop;
-      return;
-    }
-
     const { scrollTop, scrollHeight, clientHeight } = scrollEl;
     const distFromBottom = scrollHeight - clientHeight - scrollTop;
 
@@ -1156,12 +1181,29 @@ function ChatPanel({
     const isScrollingUp =
       lastScrollTopRef.current > 0 && scrollTop < lastScrollTopRef.current - 2;
 
+    if (isScrollingUp) {
+      // User explicitly moved upward: immediately release settle lock and yield to user
+      isManualScrollingRef.current = true;
+      initialSettleActiveRef.current = false;
+      if (initialChannelLoadLockRef.current.chanId === channel.id) {
+        initialChannelLoadLockRef.current.active = false;
+      }
+      isAtBottomRef.current = false;
+      isInitialScrollPendingRef.current = false;
+    } else if (
+      initialChannelLoadLockRef.current.active &&
+      initialChannelLoadLockRef.current.chanId === channel.id
+    ) {
+      isAtBottomRef.current = true;
+      lastScrollTopRef.current = scrollEl.scrollTop;
+      return;
+    }
+
     let isAtBottom = false;
     if (isScrollingUp) {
-      // Immediately suspend automatic scrolling as soon as user explicitly moves upward
       isAtBottom = false;
       isInitialScrollPendingRef.current = false;
-    } else if (isInitialScrollPendingRef.current) {
+    } else if (isInitialScrollPendingRef.current || initialSettleActiveRef.current) {
       isAtBottom = true;
     } else {
       // Considered at bottom when scrolling down or sitting within threshold or maintaining bottom position during content expansion
@@ -1263,8 +1305,9 @@ function ChatPanel({
         prevHeight = scrollEl.clientHeight;
 
         if (widthChanged) {
-          if (isAtBottomRef.current) {
+          if (isAtBottomRef.current || initialSettleActiveRef.current) {
             scrollEl.scrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+            lastScrollTopRef.current = scrollEl.scrollTop;
           } else {
             const anchor =
               panelResizeAnchorRef.current || getLiveViewportAnchor();
@@ -1272,16 +1315,25 @@ function ChatPanel({
           }
         } else if (heightChanged) {
           // If height changed (e.g. textarea expanding, reply box opening, window height change),
-          // only maintain bottom if the user was actively sitting at the bottom.
-          // If the user was scrolled up reading or looking at messages, native overflow-anchor holds the scroll static without pushing.
-          if (isAtBottomRef.current) {
+          // maintain bottom if the user was actively sitting at the bottom or during initial load settle
+          if (isAtBottomRef.current || initialSettleActiveRef.current) {
             scrollEl.scrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+            lastScrollTopRef.current = scrollEl.scrollTop;
+          }
+        } else if ((initialSettleActiveRef.current || isAtBottomRef.current) && !isManualScrollingRef.current) {
+          const target = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+          if (Math.abs(scrollEl.scrollTop - target) > 1) {
+            scrollEl.scrollTop = target;
+            lastScrollTopRef.current = target;
           }
         }
       });
     });
 
     observer.observe(scrollEl);
+    if (bottomAnchorRef.current) {
+      observer.observe(bottomAnchorRef.current);
+    }
     return () => {
       observer.disconnect();
       if (rafId) cancelAnimationFrame(rafId);
@@ -3282,10 +3334,12 @@ function ChatPanel({
       loadMoreScrollAnchorRef.current = null;
       updateVirtualRange();
     } else if (
-      initialScrollAppliedChannelRef.current !== channel.id &&
-      (isInitialScrollPendingRef.current ||
-        (initialChannelLoadLockRef.current.active &&
-          initialChannelLoadLockRef.current.chanId === channel.id))
+      (initialScrollAppliedChannelRef.current !== channel.id ||
+        messagesScrolledForChannelRef.current !== channel.id ||
+        initialChannelLoadLockRef.current.active ||
+        initialSettleActiveRef.current) &&
+      !isManualScrollingRef.current &&
+      isAtBottomRef.current
     ) {
       scrollEl.scrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
       lastScrollTopRef.current = scrollEl.scrollTop;
@@ -4225,12 +4279,20 @@ function ChatPanel({
         cancelAnimationFrame(initialScrollCorrectionRafRef.current);
         initialScrollCorrectionRafRef.current = null;
       }
+      if (initialSettleTimerRef.current !== null) {
+        clearTimeout(initialSettleTimerRef.current);
+        initialSettleTimerRef.current = null;
+      }
       initialScrollAppliedChannelRef.current = null;
+      messagesScrolledForChannelRef.current = null;
       prevOldestMessageIdRef.current = null;
       prevOldestContentOffsetRef.current = null;
       prevScrollHeightRef.current = 0;
       loadMoreScrollAnchorRef.current = null;
       isInitialScrollPendingRef.current = true;
+      initialSettleActiveRef.current = true;
+      isManualScrollingRef.current = false;
+      isAtBottomRef.current = true;
       initialChannelLoadLockRef.current = {
         chanId: currentChanId,
         active: true,
@@ -4276,13 +4338,12 @@ function ChatPanel({
     const lastMsg = sortedMessages[sortedMessages.length - 1];
     const lastMsgId = lastMsg?.id || null;
     const persistedSnapshot = readSessionSnapshot();
-    const persistedScrollTop = persistedSnapshot?.scrollPositions?.[currentChanId];
     const saved = conversationCache.get(currentChanId) ||
-      (typeof persistedScrollTop === 'number'
+      (persistedSnapshot?.drafts?.[currentChanId]
         ? {
-            scrollTop: persistedScrollTop,
-            isAtBottom: persistedScrollTop <= 0,
-            inputText: persistedSnapshot?.drafts?.[currentChanId] || '',
+            scrollTop: 0,
+            isAtBottom: true,
+            inputText: persistedSnapshot.drafts[currentChanId] || '',
             replyTo: null,
             attachments: [],
             processedAttachments: [],
@@ -4293,6 +4354,9 @@ function ChatPanel({
         : undefined);
 
     // If channel changed or initial mount or messages populated for channel first time: restore state and scroll position synchronously before paint
+    const hasMessages = sortedMessages.length > 0;
+    const isNewMessagesArrivalForChannel =
+      hasMessages && messagesScrolledForChannelRef.current !== currentChanId;
     const isForegroundSwitch =
       lastChannelIdForScrollRef.current !== currentChanId || isBecameActive;
     const isFirstLoadForChannel =
@@ -4301,18 +4365,19 @@ function ChatPanel({
       initialChannelLoadLockRef.current.chanId === currentChanId &&
       initialChannelLoadLockRef.current.active;
     const isPendingScroll =
-      isInitialScrollPendingRef.current || isFirstLoadForChannel || isChannelLoadingActive;
+      isInitialScrollPendingRef.current || isFirstLoadForChannel || isChannelLoadingActive || isNewMessagesArrivalForChannel;
     const needsInitialScroll =
-      initialScrollAppliedChannelRef.current !== currentChanId;
+      initialScrollAppliedChannelRef.current !== currentChanId || isNewMessagesArrivalForChannel;
 
     if (
       needsInitialScroll &&
       (isForegroundSwitch || isChannelChanged || isPendingScroll)
     ) {
-      if (sortedMessages.length > 0) {
+      if (hasMessages) {
         // Mark before calling executeScroll so the sibling layout effect and
         // any synchronous state update cannot schedule another correction for
         // the same conversation.
+        messagesScrolledForChannelRef.current = currentChanId;
         initialScrollAppliedChannelRef.current = currentChanId;
         lastChannelIdForScrollRef.current = currentChanId;
         lastMessageIdRef.current = lastMsgId;
@@ -4330,7 +4395,8 @@ function ChatPanel({
           }
 
           if (scrollRef.current) {
-            executeScroll("initial", saved.isAtBottom ? undefined : { targetTop: saved.scrollTop });
+            // Opening chat always defaults to bottom (newest message)
+            executeScroll("initial");
           }
         } else {
           if (isChannelChanged) {
@@ -5184,8 +5250,25 @@ function ChatPanel({
 
           {/* Messages Feed Area with fade animation */}
           <div
+            id="chat-messages-scroll-container"
             ref={scrollRef}
             onScroll={handleScrollFeed}
+            onWheel={(e) => {
+              if (e.deltaY < 0) {
+                isManualScrollingRef.current = true;
+                initialSettleActiveRef.current = false;
+                if (initialChannelLoadLockRef.current.chanId === channel.id) {
+                  initialChannelLoadLockRef.current.active = false;
+                }
+              }
+            }}
+            onTouchMove={() => {
+              isManualScrollingRef.current = true;
+              initialSettleActiveRef.current = false;
+              if (initialChannelLoadLockRef.current.chanId === channel.id) {
+                initialChannelLoadLockRef.current.active = false;
+              }
+            }}
             style={{
               overflowAnchor: "none",
             }}
@@ -7046,6 +7129,8 @@ function ChatPanel({
 
             {/* Scroll bottom anchor */}
             <div
+              id="chat-bottom-anchor"
+              ref={bottomAnchorRef}
               style={{
                 overflowAnchor: "none",
                 height: "1px",

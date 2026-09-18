@@ -1,5 +1,19 @@
 # Sirver Application Changelog
 
+## [3.9-chat-open-at-bottom-guarantee] - 2026-09-18
+### Guaranteed WhatsApp-like opening behavior: chats always start at newest message
+- **Bottom-Default on Chat Open**:
+  - Overrode stale cached scroll offsets when entering any channel or DM conversation so opening a chat always starts directly at the bottom (newest message), exactly like WhatsApp.
+  - Retained input draft preservation (`inputText`, attachments, replies) without carrying over stale scroll heights from previous sessions.
+- **Initial Load Settle Window & Anchor Alignment**:
+  - Implemented a 400ms settle window (`initialSettleActiveRef`) combined with multi-frame RAF and timeout passes to guarantee that late layout expansions (images decoding, message avatars, sender headers) remain anchored to the bottom.
+  - Enhanced `executeScroll("mediaLoad")` and `ResizeObserver` so media decodes during initial view never shove the feed away from the bottom.
+- **Immediate User Override**:
+  - Added instantaneous user scroll detection on wheel (`onWheel`), touch (`onTouchMove`), and upward scrolling (`scrollTop < lastScrollTop - 2`) so if the user manually scrolls up, the settle lock is instantly relinquished and the user has full, uninterrupted control.
+- **Late Message Arrival & Bottom Virtualization**:
+  - Initialized `virtualRangeRef` directly to the bottom messages (`sortedMessages.length - 40` to `length - 1`) on channel selection, avoiding top-to-bottom virtual jumping.
+  - Handled asynchronous message population (`isNewMessagesArrivalForChannel`) so initial scroll to bottom triggers reliably even when message data arrives after component mount.
+
 ## [3.9-whatsapp-scroll-anchoring-instant-load] - 2026-09-18
 ### WhatsApp-like scroll anchoring and predictive read-ahead buffer for older messages
 - **Rock-Solid Scroll Anchoring (WhatsApp Behavior)**:
