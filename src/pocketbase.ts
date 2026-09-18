@@ -10,6 +10,7 @@ import ENDPOINTS from './config/endpoints';
 import APP_URLS from './config/urls';
 import { buildOlderMessageFilter, cursorFromMessage, INITIAL_MESSAGE_PAGE_SIZE } from './services/messagePagination';
 import { isUserPresenceExpired } from './services/presencePolicy';
+import { isClientCancellation } from './services/backendAvailability';
 export { USER_PRESENCE_EXPIRY_MS } from './services/presencePolicy';
 
 export class PocketBaseUnavailableError extends Error {
@@ -62,7 +63,8 @@ function isSchemaCompatibilityError(error: any): boolean {
   return false;
 }
 
-let cachedMessageExpand = 'sender,reply_to,attachments(message),private_attachments(message)';
+let cachedChannelMessageExpand = 'sender,reply_to,attachments(message)';
+let cachedPrivateMessageExpand = 'sender,reply_to,private_attachments(message)';
 
 export function mergeUserRecord(existing: User | null | undefined, updated: Partial<User> | null | undefined): User {
   if (!existing && !updated) {
@@ -2020,39 +2022,35 @@ class PocketBaseService {
 
     const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
     const filter = buildOlderMessageFilter(`channel = "${channelId.replace(/"/g, '\\"')}"`, cursor);
-    const cursorKey = cursor ? `${cursor.created}_${cursor.id}` : 'initial';
-    const requestKey = `history:channel:${channelId}:${cursorKey}`;
-    // PocketBase cancels an in-flight request with the same request key. This
-    // matters when a user switches away and back before the old page returns;
-    // the generation guard in App.tsx remains the final stale-result barrier.
-    (this.pb as any).cancelRequest?.(requestKey);
     let records: any;
     try {
       const query = (expand: string) => this.pb.collection('messages').getList(1, safeLimit + 1, {
         filter,
         sort: '-created,-id',
         expand,
-        requestKey,
+        skipTotal: true,
+        requestKey: null,
       });
       try {
         records = await this.withReadDeadline(
-          () => query(cachedMessageExpand),
-          requestKey,
+          () => query(cachedChannelMessageExpand),
+          undefined,
           options?.timeoutMs,
         );
       } catch (schemaError) {
         if (!isSchemaCompatibilityError(schemaError)) throw schemaError;
-        const fallbackExpand = cachedMessageExpand.includes('attachments(')
-          ? 'sender,reply_to,attachments_via_message,private_attachments_via_message'
-          : 'sender,reply_to,attachments(message),private_attachments(message)';
+        const fallbackExpand = cachedChannelMessageExpand.includes('attachments(')
+          ? 'sender,reply_to,attachments_via_message'
+          : 'sender,reply_to,attachments(message)';
         records = await this.withReadDeadline(
           () => query(fallbackExpand),
-          requestKey,
+          undefined,
           options?.timeoutMs,
         );
-        cachedMessageExpand = fallbackExpand;
+        cachedChannelMessageExpand = fallbackExpand;
       }
     } catch (err: any) {
+      if (isClientCancellation(err)) throw err;
       throw new PocketBaseUnavailableError(
         err?.message || 'The chat service is temporarily unavailable',
         err?.status,
@@ -2091,36 +2089,35 @@ class PocketBaseService {
 
     const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
     const filter = buildOlderMessageFilter(`chat_server = "${targetServerId.replace(/"/g, '\\"')}"`, cursor);
-    const cursorKey = cursor ? `${cursor.created}_${cursor.id}` : 'initial';
-    const requestKey = `history:dm:${targetServerId}:${cursorKey}`;
-    (this.pb as any).cancelRequest?.(requestKey);
     let records: any;
     try {
       const query = (expand: string) => this.pb.collection('private_messages').getList(1, safeLimit + 1, {
         filter,
         sort: '-created,-id',
         expand,
-        requestKey,
+        skipTotal: true,
+        requestKey: null,
       });
       try {
         records = await this.withReadDeadline(
-          () => query(cachedMessageExpand),
-          requestKey,
+          () => query(cachedPrivateMessageExpand),
+          undefined,
           options?.timeoutMs,
         );
       } catch (schemaError) {
         if (!isSchemaCompatibilityError(schemaError)) throw schemaError;
-        const fallbackExpand = cachedMessageExpand.includes('attachments(')
-          ? 'sender,reply_to,attachments_via_message,private_attachments_via_message'
-          : 'sender,reply_to,attachments(message),private_attachments(message)';
+        const fallbackExpand = cachedPrivateMessageExpand.includes('attachments(')
+          ? 'sender,reply_to,private_attachments_via_message'
+          : 'sender,reply_to,private_attachments(message)';
         records = await this.withReadDeadline(
           () => query(fallbackExpand),
-          requestKey,
+          undefined,
           options?.timeoutMs,
         );
-        cachedMessageExpand = fallbackExpand;
+        cachedPrivateMessageExpand = fallbackExpand;
       }
     } catch (err: any) {
+      if (isClientCancellation(err)) throw err;
       throw new PocketBaseUnavailableError(
         err?.message || 'The chat service is temporarily unavailable',
         err?.status,

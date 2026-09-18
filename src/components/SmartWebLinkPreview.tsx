@@ -63,19 +63,35 @@ async function fetchLinkMetadata(rawUrl: string): Promise<LinkPreviewData> {
       .replace(/[-_]/g, " ")
       .replace(/\b\w/g, (c) => c.toUpperCase()) || host;
 
+  const defaultScreenshot = `https://api.microlink.io/?url=${encodeURIComponent(normalizedUrl)}&screenshot=true&embed=screenshot.url`;
+
+  // Direct image URL detection (e.g. image links shared directly)
+  if (/\.(jpe?g|png|gif|webp|svg|bmp)(\?.*)?$/i.test(normalizedUrl)) {
+    return {
+      url: normalizedUrl,
+      domain: host,
+      title: cleanTitle,
+      image: normalizedUrl,
+      siteName: host,
+      faviconUrl: defaultFavicon,
+      timestamp: Date.now(),
+    };
+  }
+
   const fallbackData: LinkPreviewData = {
     url: normalizedUrl,
     domain: host,
     title: cleanTitle,
     faviconUrl: defaultFavicon,
+    image: defaultScreenshot,
     timestamp: Date.now(),
   };
 
-  // Asynchronous Microlink metadata fetch with 3.5s timeout
+  // Asynchronous Microlink metadata fetch with 6s timeout and screenshot fallback
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3500);
-    const res = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(normalizedUrl)}`, {
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const res = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(normalizedUrl)}&screenshot=true`, {
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
@@ -88,7 +104,11 @@ async function fetchLinkMetadata(rawUrl: string): Promise<LinkPreviewData> {
         const fetchedDesc =
           typeof d.description === "string" && d.description.trim() ? d.description.trim() : undefined;
         const fetchedImg =
-          typeof d.image?.url === "string" && d.image.url.trim() ? d.image.url.trim() : undefined;
+          (typeof d.image?.url === "string" && d.image.url.trim())
+            ? d.image.url.trim()
+            : (typeof d.screenshot?.url === "string" && d.screenshot.url.trim()
+              ? d.screenshot.url.trim()
+              : defaultScreenshot);
         const fetchedLogo =
           typeof d.logo?.url === "string" && d.logo.url.trim() ? d.logo.url.trim() : defaultFavicon;
         const fetchedPublisher =
@@ -121,6 +141,10 @@ export const SmartWebLinkPreview: React.FC<SmartWebLinkPreviewProps> = React.mem
   const [data, setData] = useState<LinkPreviewData | null>(() => loadCachedPreview(url));
   const [loading, setLoading] = useState<boolean>(() => !loadCachedPreview(url));
   const [imgError, setImgError] = useState<boolean>(false);
+  const [imgSrc, setImgSrc] = useState<string | undefined>(() => {
+    const cached = loadCachedPreview(url);
+    return cached?.image || `https://api.microlink.io/?url=${encodeURIComponent(url.startsWith("http") ? url : `https://${url}`)}&screenshot=true&embed=screenshot.url`;
+  });
   const [faviconError, setFaviconError] = useState<boolean>(false);
 
   useEffect(() => {
@@ -128,6 +152,7 @@ export const SmartWebLinkPreview: React.FC<SmartWebLinkPreviewProps> = React.mem
     const cached = loadCachedPreview(url);
     if (cached) {
       setData(cached);
+      if (cached.image) setImgSrc(cached.image);
       setLoading(false);
       return;
     }
@@ -139,6 +164,7 @@ export const SmartWebLinkPreview: React.FC<SmartWebLinkPreviewProps> = React.mem
         if (!active) return;
         saveCachedPreview(url, res);
         setData(res);
+        if (res.image) setImgSrc(res.image);
         setLoading(false);
       });
     };
@@ -154,6 +180,16 @@ export const SmartWebLinkPreview: React.FC<SmartWebLinkPreviewProps> = React.mem
     e.stopPropagation();
     e.preventDefault();
     openExternalUrl(url);
+  };
+
+  const handleImageError = () => {
+    const normalizedUrl = url.startsWith("http") ? url : `https://${url}`;
+    const screenshotFallback = `https://api.microlink.io/?url=${encodeURIComponent(normalizedUrl)}&screenshot=true&embed=screenshot.url`;
+    if (imgSrc && imgSrc !== screenshotFallback) {
+      setImgSrc(screenshotFallback);
+    } else {
+      setImgError(true);
+    }
   };
 
   const domainDisplay = data?.domain || url;
@@ -196,17 +232,17 @@ export const SmartWebLinkPreview: React.FC<SmartWebLinkPreviewProps> = React.mem
 
       {/* Main Content Area */}
       <div className="flex flex-col gap-2">
-        {/* Only render image container if image is present or currently loading */}
-        {(loading || (data?.image && !imgError)) && (
-          <div className="w-full h-36 sm:h-40 rounded-xl overflow-hidden bg-[var(--theme-bg-tertiary)] border border-[var(--theme-border)] relative shrink-0 flex items-center justify-center">
-            {data?.image && !imgError ? (
+        {/* Render image preview container */}
+        {(loading || (!imgError && imgSrc)) && (
+          <div className="w-full h-36 sm:h-44 rounded-xl overflow-hidden bg-[var(--theme-bg-tertiary)] border border-[var(--theme-border)] relative shrink-0 flex items-center justify-center">
+            {!loading && imgSrc && !imgError ? (
               <img
-                src={data.image}
-                alt=""
+                src={imgSrc}
+                alt={titleDisplay}
                 className="w-full h-full object-cover group-hover:scale-102 transition-transform duration-300"
                 loading="lazy"
                 decoding="async"
-                onError={() => setImgError(true)}
+                onError={handleImageError}
                 referrerPolicy="no-referrer"
               />
             ) : (

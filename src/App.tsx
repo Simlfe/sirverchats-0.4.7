@@ -2512,8 +2512,11 @@ export default function App() {
       let targetUser = targetChan.recipientUser;
       let chatServerId = channelId.startsWith('dm-server-') ? channelId.replace(/^dm-server-/, '') : undefined;
       const cachedEntry = messagesCache.current[channelId];
+      const currentDataset = (activeChannelRef.current?.id === channelId && messages.length > 0)
+        ? messages
+        : (cachedEntry?.items || []);
       const cursor = append
-        ? (cachedEntry?.oldestCursor || getOldestCursor(cachedEntry?.items))
+        ? (getOldestCursor(currentDataset) || cachedEntry?.oldestCursor)
         : null;
 
       try {
@@ -2649,8 +2652,10 @@ export default function App() {
         // Cursor pagination: the id tie-breaker is calculated from the oldest
         // message in the active cache, so equal-timestamp rows are not skipped.
         const currentEntry = messagesCache.current[channelId];
-        const currentDataset = currentEntry?.items || messages;
-        const oldestCursor = currentEntry?.oldestCursor || getOldestCursor(currentDataset);
+        const currentDataset = (activeChannelRef.current?.id === channelId && messages.length > 0)
+          ? messages
+          : (currentEntry?.items || []);
+        const oldestCursor = getOldestCursor(currentDataset) || currentEntry?.oldestCursor;
         const page = await pbService.fetchMessagesPage(channelId, oldestCursor, requestLimit);
         if (!requestIsCurrent()) return;
 
@@ -2817,8 +2822,10 @@ export default function App() {
     const entry = messagesCache.current[conversationId];
     if (entry && entry.remoteHasMore === false) return;
     const kind = isDm ? 'dm' : 'channel';
-    const currentDataset = entry?.items || (activeChannelRef.current?.id === conversationId ? messages : []);
-    const oldestCursor = entry?.oldestCursor || getOldestCursor(currentDataset);
+    const currentDataset = (activeChannelRef.current?.id === conversationId && messages.length > 0)
+      ? messages
+      : (entry?.items || []);
+    const oldestCursor = getOldestCursor(currentDataset) || entry?.oldestCursor;
     if (!oldestCursor) return;
 
     prefetchingConversationsRef.current.add(conversationId);
@@ -2931,15 +2938,49 @@ export default function App() {
           if (prefetched.hasMore) {
             setTimeout(() => {
               prefetchNextOlderPage(conversationId, isDm);
-            }, 60);
+            }, 10);
           }
           return;
         }
       }
 
-      const persistedMetadata = await offlineCacheService.getMessageMetadata(kind, conversationId);
-      const knownRemoteHasMore = entry?.remoteHasMore ?? persistedMetadata?.remoteHasMore;
       const visibleOldestCursor = getOldestCursor(messages);
+      // Fast-path: Check synchronous in-memory cache first to avoid IndexedDB round-trip lag
+      const syncCachedPage = offlineCacheService.getMessagePageSync(kind, conversationId, visibleOldestCursor);
+      if (syncCachedPage?.items?.length) {
+        const revealedItems = mergeOlderMessagePage(
+          messages,
+          syncCachedPage.items,
+          MAX_ACTIVE_MESSAGES,
+        );
+        if (didMessageWindowMoveOlder(messages, revealedItems)) {
+          const cachedHasMore = syncCachedPage.hasMore;
+          setMessages(revealedItems);
+          setHasMoreMessages(cachedHasMore);
+          const revealedEntry = entry || {
+            items: [],
+            page: messagesPage,
+            hasMore: cachedHasMore,
+            remoteHasMore: cachedHasMore,
+            cachedPagesAvailable: 0,
+            newestCursor: getNewestCursor(revealedItems),
+            oldestCursor: getOldestCursor(revealedItems),
+          };
+          revealedEntry.items = revealedItems;
+          revealedEntry.hasMore = cachedHasMore;
+          revealedEntry.newestCursor = getNewestCursor(revealedItems);
+          revealedEntry.oldestCursor = getOldestCursor(revealedItems);
+          messagesCache.current[conversationId] = revealedEntry;
+          if (cachedHasMore) {
+            setTimeout(() => {
+              prefetchNextOlderPage(conversationId, isDm);
+            }, 10);
+          }
+          return;
+        }
+      }
+
+      // Check async storage cache
       const cachedPage = await offlineCacheService.getNextOlderMessagePage(
         kind,
         conversationId,
@@ -2953,49 +2994,38 @@ export default function App() {
           cachedPage.items,
           MAX_ACTIVE_MESSAGES,
         );
-        // At the 500-row cap a valid prepend replaces equally many rows from
-        // the newest edge. Detect movement by the oldest message, not length.
         if (didMessageWindowMoveOlder(messages, revealedItems)) {
-          const cachedHasMore = cachedPage.hasMore || knownRemoteHasMore !== false;
+          const cachedHasMore = cachedPage.hasMore;
           setMessages(revealedItems);
           setHasMoreMessages(cachedHasMore);
           const revealedEntry = entry || {
             items: [],
             page: messagesPage,
-            hasMore: knownRemoteHasMore !== false,
-            remoteHasMore: knownRemoteHasMore,
+            hasMore: cachedHasMore,
+            remoteHasMore: cachedHasMore,
             cachedPagesAvailable: 0,
             newestCursor: getNewestCursor(revealedItems),
             oldestCursor: getOldestCursor(revealedItems),
           };
           revealedEntry.items = revealedItems;
           revealedEntry.hasMore = cachedHasMore;
-          revealedEntry.cachedPagesAvailable = Math.max(
-            0,
-            (revealedEntry.cachedPagesAvailable || persistedMetadata?.cachedPagesAvailable || 1) - 1,
-          );
           revealedEntry.newestCursor = getNewestCursor(revealedItems);
           revealedEntry.oldestCursor = getOldestCursor(revealedItems);
           messagesCache.current[conversationId] = revealedEntry;
           if (cachedHasMore) {
             setTimeout(() => {
               prefetchNextOlderPage(conversationId, isDm);
-            }, 60);
+            }, 10);
           }
           return;
         }
-      }
-
-      if (knownRemoteHasMore === false || entry?.remoteHasMore === false) {
-        setHasMoreMessages(false);
-        return;
       }
 
       const nextPage = messagesPage + 1;
       await loadMessages(conversationId, nextPage, true, null, OLDER_MESSAGE_PAGE_SIZE);
       setTimeout(() => {
         prefetchNextOlderPage(conversationId, isDm);
-      }, 100);
+      }, 20);
     } finally {
       olderMessageRequestRef.current.delete(conversationId);
     }

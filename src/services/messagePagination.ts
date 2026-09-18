@@ -1,7 +1,7 @@
 import { ConversationKind, Message, MessageCursor, MessagePage } from '../types';
 
 export const INITIAL_MESSAGE_PAGE_SIZE = 20;
-export const OLDER_MESSAGE_PAGE_SIZE = 20;
+export const OLDER_MESSAGE_PAGE_SIZE = 40;
 export const MAX_ACTIVE_MESSAGES = 500;
 
 /**

@@ -998,6 +998,8 @@ function ChatPanel({
     if (source === "newMessage") {
       scrollEl.scrollTop = scrollEl.scrollHeight;
       isAtBottomRef.current = true;
+      isManualScrollingRef.current = false;
+      setShowScrollToBottom(false);
       lastScrollTopRef.current = scrollEl.scrollTop;
       return;
     }
@@ -1043,7 +1045,7 @@ function ChatPanel({
       !onLoadMoreMessages ||
       isLoadingMore ||
       isFetchingMoreRef.current ||
-      isManualScrollingRef.current ||
+      !hasMoreMessages ||
       // The top sentinel sits at the top of an empty feed and would
       // otherwise race the initial newest-page request. Wait until at least
       // one cached/remote message is visible before asking for older history.
@@ -1123,9 +1125,7 @@ function ChatPanel({
       console.error("Failed to load older messages:", err);
       loadMoreScrollAnchorRef.current = null;
     } finally {
-      setTimeout(() => {
-        isFetchingMoreRef.current = false;
-      }, 150);
+      isFetchingMoreRef.current = false;
       // Fallback cleanup in case no messages were prepended to sortedMessages
       setTimeout(() => {
         if (loadMoreScrollAnchorRef.current) {
@@ -1136,6 +1136,7 @@ function ChatPanel({
   }, [
     onLoadMoreMessages,
     isLoadingMore,
+    hasMoreMessages,
     getLiveViewportAnchor,
     messages.length,
     isInitialLoading,
@@ -1149,13 +1150,21 @@ function ChatPanel({
     if (!sentinel || !root || typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) handleLoadMore();
+        if (
+          entries.some((entry) => entry.isIntersecting) &&
+          hasMoreMessages &&
+          !isLoadingMore &&
+          !isFetchingMoreRef.current &&
+          !initialChannelLoadLockRef.current.active
+        ) {
+          handleLoadMore();
+        }
       },
-      { root, rootMargin: '600px 0px 0px 0px', threshold: 0 },
+      { root, rootMargin: '1500px 0px 0px 0px', threshold: 0 },
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [handleLoadMore, channel.id]);
+  }, [handleLoadMore, channel.id, hasMoreMessages, isLoadingMore]);
 
   const preloadedMediaUrlsRef = useRef<Set<string>>(new Set());
   const preloadMediaForRangeRef = useRef<(startIdx: number, endIdx: number) => void>(() => {});
@@ -1215,31 +1224,62 @@ function ChatPanel({
     // Immediately update ref synchronously to prevent race conditions during scroll frame
     isAtBottomRef.current = isAtBottom;
 
+    if (isAtBottom) {
+      isManualScrollingRef.current = false;
+    }
+
     // Fast-path: When scrolling upward near the top, proactively trigger loading older
     // messages immediately without waiting for RAF frame cycle
-    const preloadThreshold = 550;
+    const preloadThreshold = 1500;
     if (
       isScrollingUp &&
       scrollTop < preloadThreshold &&
       hasMoreMessages &&
       !isLoadingMore &&
       !isFetchingMoreRef.current &&
-      !isManualScrollingRef.current &&
       !initialChannelLoadLockRef.current.active
     ) {
       handleLoadMore();
     }
+
+    // Synchronously determine whether scroll-to-bottom button should show
+    const shouldShowScrollBtn =
+      !isAtBottom &&
+      distFromBottom > 80 &&
+      sortedMessages.length > 3 &&
+      !initialSettleActiveRef.current &&
+      !isInitialScrollPendingRef.current;
+
+    setShowScrollToBottom((prev) =>
+      prev !== shouldShowScrollBtn ? shouldShowScrollBtn : prev,
+    );
 
     if (scrollRafRef.current !== null) return;
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null;
       if (!scrollRef.current) return;
 
-      if (!isManualScrollingRef.current) {
-        const shouldShow = !isAtBottom && sortedMessages.length > 5;
-        setShowScrollToBottom((prev) =>
-          prev !== shouldShow ? shouldShow : prev,
-        );
+      const currentScrollEl = scrollRef.current;
+      const currentDist = Math.max(
+        0,
+        currentScrollEl.scrollHeight -
+          currentScrollEl.clientHeight -
+          currentScrollEl.scrollTop,
+      );
+      const currentAtBottom =
+        currentDist <= 35 ||
+        (isAtBottomRef.current && currentDist <= 100);
+
+      if (currentAtBottom) {
+        isManualScrollingRef.current = false;
+        setShowScrollToBottom(false);
+      } else if (
+        currentDist > 80 &&
+        sortedMessages.length > 3 &&
+        !initialSettleActiveRef.current &&
+        !isInitialScrollPendingRef.current
+      ) {
+        setShowScrollToBottom(true);
       }
 
       // Re-render only the bounded window around the viewport. Message rows
@@ -1255,8 +1295,7 @@ function ChatPanel({
         scrollTop < preloadThreshold &&
         hasMoreMessages &&
         !isLoadingMore &&
-        !isFetchingMoreRef.current &&
-        !isManualScrollingRef.current
+        !isFetchingMoreRef.current
       ) {
         handleLoadMore();
       }
@@ -3158,7 +3197,8 @@ function ChatPanel({
     updateVirtualRange();
   }, [updateVirtualRange, channel.id, sortedMessages.length]);
 
-  React.useEffect(() => {
+  // Pre-calculate accurate heights synchronously before paint to prevent layout shifts or flicker
+  React.useLayoutEffect(() => {
     for (let i = 0; i < sortedMessages.length; i++) {
       const msg = sortedMessages[i];
       if (msg && !itemHeightsRef.current.has(msg.id)) {
@@ -3254,6 +3294,38 @@ function ChatPanel({
     if (!scrollRef.current) return;
     const scrollEl = scrollRef.current;
     const scrollRect = scrollEl.getBoundingClientRect();
+
+    // Pre-calculate message heights synchronously before measuring DOM offsets or adjusting scroll
+    for (let i = 0; i < sortedMessages.length; i++) {
+      const msg = sortedMessages[i];
+      if (msg && !itemHeightsRef.current.has(msg.id)) {
+        const isFirstInDay =
+          i === 0 ||
+          !isSameCalendarDay(
+            new Date(msg.created),
+            new Date(sortedMessages[i - 1].created),
+          );
+        const prevMsg = i > 0 ? sortedMessages[i - 1] : null;
+        const isDiffUser =
+          !prevMsg || getSenderId(msg) !== getSenderId(prevMsg);
+        const isTimeWindowExceeded =
+          prevMsg &&
+          Math.abs(
+            new Date(msg.created).getTime() -
+              new Date(prevMsg.created).getTime(),
+          ) > MESSAGE_GROUPING_WINDOW_MS;
+        const isGroupHeader =
+          i === 0 || isDiffUser || isTimeWindowExceeded || isFirstInDay;
+
+        const h = calculateAccurateMessageHeight(
+          msg,
+          isFirstInDay,
+          isGroupHeader,
+          unreadSeparatorMsgId,
+        );
+        itemHeightsRef.current.set(msg.id, h);
+      }
+    }
 
     const prevOldestId = prevOldestMessageIdRef.current;
     const currentOldestId = sortedMessages[0]?.id || null;
@@ -4298,6 +4370,7 @@ function ChatPanel({
         active: true,
       };
       setIsInitialLoadReady(false);
+      setShowScrollToBottom(false);
       if (prevChanId && isChannelChanged) {
         const prevSaved = conversationCache.get(prevChanId);
         if (
@@ -4460,6 +4533,8 @@ function ChatPanel({
         initialChannelLoadLockRef.current.active
       ) {
         executeScroll("newMessage");
+      } else {
+        setShowScrollToBottom(true);
       }
       lastMessageIdRef.current = lastMsgId;
     }
@@ -5255,7 +5330,6 @@ function ChatPanel({
             onScroll={handleScrollFeed}
             onWheel={(e) => {
               if (e.deltaY < 0) {
-                isManualScrollingRef.current = true;
                 initialSettleActiveRef.current = false;
                 if (initialChannelLoadLockRef.current.chanId === channel.id) {
                   initialChannelLoadLockRef.current.active = false;
@@ -5263,7 +5337,6 @@ function ChatPanel({
               }
             }}
             onTouchMove={() => {
-              isManualScrollingRef.current = true;
               initialSettleActiveRef.current = false;
               if (initialChannelLoadLockRef.current.chanId === channel.id) {
                 initialChannelLoadLockRef.current.active = false;
@@ -7833,28 +7906,31 @@ function ChatPanel({
             )}
           </AnimatePresence>
 
-          {/* Floating Scroll to Bottom Button - Absolutely Positioned to avoid layout height reflow */}
-          <AnimatePresence>
-            {showScrollToBottom && (
-              <motion.div
-                initial={{ opacity: 0, y: 10, scale: 0.9 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 10, scale: 0.9 }}
-                className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 pointer-events-auto shadow-2xl"
-              >
-                <button
-                  type="button"
-                  onClick={() => executeScroll("user")}
-                  className="px-3.5 py-1.5 rounded-full text-xs font-bold shadow-xl flex items-center gap-1.5 transition-all cursor-pointer border border-[var(--theme-border)] bg-[var(--theme-bg-card)] text-accent hover:bg-[var(--theme-bg-tertiary)] hover:scale-105 active:scale-95"
+          {/* Floating Scroll to Bottom Button - Absolutely Positioned above message form */}
+          <div className="relative w-full flex justify-center pointer-events-none z-40 h-0">
+            <AnimatePresence>
+              {showScrollToBottom && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10, scale: 0.9 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.9 }}
+                  className="absolute bottom-3 left-1/2 -translate-x-1/2 pointer-events-auto shadow-2xl"
                 >
-                  <ArrowDown className="w-3.5 h-3.5" />
-                  <span>
-                    {lang === "ar" ? "الرجوع للأسفل" : "Scroll to bottom"}
-                  </span>
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+                  <button
+                    type="button"
+                    id="chat-scroll-to-bottom-btn"
+                    onClick={() => executeScroll("user")}
+                    className="px-4 py-2 rounded-full text-xs font-bold shadow-2xl flex items-center gap-2 transition-all cursor-pointer border border-[var(--theme-border)] bg-[var(--theme-bg-card)] text-accent hover:bg-[var(--theme-bg-tertiary)] hover:scale-105 active:scale-95 backdrop-blur-md"
+                  >
+                    <ArrowDown className="w-3.5 h-3.5 animate-bounce" />
+                    <span>
+                      {lang === "ar" ? "الرجوع للأسفل" : "Scroll to bottom"}
+                    </span>
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
           {/* Form message entry box panel container */}
           <form
             onSubmit={handleSend}

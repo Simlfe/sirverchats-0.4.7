@@ -1,5 +1,45 @@
 # Sirver Application Changelog
 
+## [3.9-seamless-infinite-scroll-zero-flicker] - 2026-09-18
+### Optimized older message loading with seamless background infinite scroll and zero-flicker scroll anchoring
+- **Optimized Loading Latency & Bottlenecks**:
+  - Added `skipTotal: true` to PocketBase `getList` queries in `fetchMessagesPage` and `fetchDirectMessagesPage`, bypassing the heavy `COUNT(*)` database scan on every older message fetch.
+  - Split collection expand parameter strings into channel-specific (`attachments`) and private-message-specific (`private_attachments`) expansions, eliminating 400 schema error retries.
+  - Increased `OLDER_MESSAGE_PAGE_SIZE` from 20 to 40 items, cutting the required network trips by 50%.
+  - Added synchronous in-memory cache inspection (`getMessagePageSync`) before asynchronous disk storage calls to eliminate waterfall delays when navigating recently viewed history.
+- **Seamless Proactive Infinite Scroll**:
+  - Increased `preloadThreshold` from 550px to 1500px and `topSentinelRef` `rootMargin` from 600px to 1500px in `ChatPanel.tsx`, triggering background fetching well before the user reaches the top.
+  - Removed artificial debounce delays in `handleLoadMore` cleanup, allowing smooth continuous upward scrolling.
+- **Zero-Flicker Layout & Synchronous Scroll Anchoring**:
+  - Converted message height pre-calculation to synchronous `useLayoutEffect`, ensuring all incoming message heights and spacer metrics are pre-calculated before paint.
+  - Pre-populated message heights synchronously inside the scroll-restore `useLayoutEffect` before measuring DOM offsets or adjusting scroll positions, ensuring zero visual jumps or layout shifting.
+
+## [3.9-scroll-to-bottom-button-fix] - 2026-09-18
+### Fixed scroll to bottom floating button visibility and positioning
+- **Unblocked Scroll-to-Bottom Visibility**:
+  - Removed gating condition `if (!isManualScrollingRef.current)` in `handleScrollFeed` which was preventing the button state from updating when the user manually scrolled away from the bottom.
+  - Added synchronous scroll distance evaluation (`distFromBottom > 80 && sortedMessages.length > 3`) along with RAF verification to instantly reveal the button whenever the user is scrolled up.
+  - Automatically reset `isManualScrollingRef.current` and hide the button when the user scrolls down to within 35px of the bottom.
+  - Show the button immediately when a new message arrives from another participant while the user is reading earlier history.
+- **Positioning & Layering Correction**:
+  - Moved the floating button into a zero-height anchor wrapper (`h-0 z-40`) directly above the message entry form, ensuring it stays floating exactly 12px above the chat input bar regardless of form height or active reply previews.
+  - Raised the z-index to `z-40` with backdrop blur and interactive shadow so the button is never obscured by the form container (`z-30`).
+  - Added unique element ID `chat-scroll-to-bottom-btn` and smooth bounce animation on the down arrow icon.
+
+## [3.9-older-messages-pagination-link-previews] - 2026-09-18
+### Fixed older messages infinite scroll pagination and link preview images
+- **Restored Automatic Older Messages Loading (Infinite Scroll)**:
+  - Removed accidental `isManualScrollingRef` block from `handleLoadMore` and upward scroll triggers in `ChatPanel.tsx`, ensuring upward scrolling immediately triggers older message fetching.
+  - Corrected `topSentinelRef` `IntersectionObserver` dependency bindings and gating conditions (`hasMoreMessages`, `!isLoadingMore`, `!isFetchingMoreRef.current`) so the sentinel actively requests older messages.
+  - Fixed cursor pagination calculation in `App.tsx` (`loadMessages` and `prefetchNextOlderPage`) to consistently derive the oldest timestamp/id from the visible rendered feed rather than a stale cache slice.
+  - Eliminated premature `remoteHasMore === false` fast-abort in `handleLoadMoreMessages`, ensuring the backend service is always queried when earlier history exists.
+  - Switched PocketBase pagination request keys to non-cancelling `requestKey: null` and handled client cancellations gracefully so background requests are never aborted unexpectedly.
+- **Link Preview Image Enhancements**:
+  - Direct image detection: URLs ending with `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`, `.svg` now immediately render as image previews without third-party metadata latency.
+  - High-resolution screenshot fallback: Integrated Microlink screenshot generation (`screenshot=true` and direct screenshot embed) for web pages lacking `og:image` tags.
+  - Increased scraping timeout from 3.5s to 6.0s to allow rich metadata and images to resolve reliably.
+  - Added multi-tier image recovery on load failure in `SmartWebLinkPreview.tsx` so previews always display an image.
+
 ## [3.9-chat-open-at-bottom-guarantee] - 2026-09-18
 ### Guaranteed WhatsApp-like opening behavior: chats always start at newest message
 - **Bottom-Default on Chat Open**:
