@@ -1,6 +1,6 @@
 {
   "name": "Sirverchats-0.4.7",
-  "description": "Imported from GitHub: Simlfe/SirverData",
+  "description": "SirverData is a fast community chat app with text and low-latency voice.",
   "requestFramePermissions": [
     "microphone",
     "camera"

@@ -535,17 +535,18 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
 
     // 2. Auto-start microphone for immediate audio without manual toggle unless explicitly muted
     if (!this.isMuted) {
-      const microphoneTrack = await this.enableMicrophone();
-      this.assertCurrentJoin(generation, config.roomId);
-      if (!microphoneTrack) {
-        await adapter.leaveSession().catch(() => {});
-        config.initialMicrophoneTrack?.stop();
-        this.localAudioStream = null;
-        this.participants.delete(config.user.id);
-        this.activeRoom = null;
-        this.activeSessionId = null;
-        this.setConnectionState('failed');
-        throw new Error('Microphone could not be acquired or published. Check the selected input and try again.');
+      try {
+        const microphoneTrack = await this.enableMicrophone();
+        this.assertCurrentJoin(generation, config.roomId);
+        if (!microphoneTrack) {
+          console.warn('[RealtimeMediaProvider] Microphone could not be acquired. Joining as muted participant.');
+          this.isMuted = true;
+          this.updateSelfParticipant({ isMuted: true });
+        }
+      } catch (micErr) {
+        console.warn('[RealtimeMediaProvider] Microphone init error, continuing as muted:', micErr);
+        this.isMuted = true;
+        this.updateSelfParticipant({ isMuted: true });
       }
     }
 

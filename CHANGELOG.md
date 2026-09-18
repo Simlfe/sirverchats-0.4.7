@@ -1,5 +1,46 @@
 # Sirver Application Changelog
 
+## [3.9-stability-attachment-and-voice-fix] - 2026-09-17
+### Fix disappearing messages and images, restore voice channel joining, and optimize link previews
+- **Attachment Retention in Realtime Updates**: Updated `App.tsx` realtime message handlers (`subscribeToMessages` and `subscribeToPrivateMessages`) to preserve existing attachment expansions (`attachments(message)`, `private_attachments(message)`, `attachments_via_message`) when merging server updates, preventing images from disappearing when background touch/edit events arrive.
+- **Optimistic Message Resolution**: Ensured `handleSendMessage` preserves attachment data when exchanging temporary optimistic messages for confirmed server records.
+- **Session & Performance Stability**: Removed disruptive full-app `logout()` triggers on non-critical API 401/403 responses in `src/pocketbase.ts`, preventing unexpected app reloads, state purges, and slow 2-minute delays.
+- **Voice Chat Resilient Joining**: 
+  - Updated `LiveKitManager.ts` endpoint resolution to try same-origin `/livekit/token` proxies alongside primary endpoints in browser environments.
+  - Made microphone acquisition in `prepareRoomJoin` (`MediaContext.tsx`) and `RealtimeMediaProvider.ts` tolerant: if microphone access is blocked or unavailable, the user can still join the voice room as a muted listener instead of failing room join.
+- **Link Previews & Shared Message Links**: Enhanced `MessageLinkPreview.tsx` to handle deleted messages via `MessageDeletionService`, render embedded image attachments, and correctly navigate/jump to messages in chat. Ensure `ChatPanel.tsx` keeps original text links intact when previews render.
+
+## [3.9-quiet-channel-pins-and-preview-card-cleanup] - 2026-09-17
+### Silence expected 404 warnings for channel pinned messages and message link previews
+- **Graceful Pinned Messages Fallback**: Handled 404 (`"The requested resource wasn't found."`) errors on remote channel queries quietly in `fetchPinnedMessageIds` and `togglePinMessage`, immediately using local storage without emitting warnings.
+- **Handled 404 on Message Link Previews**: Suppressed `console.warn` in `MessageLinkPreview` when target message IDs are deleted or not found, allowing the preview card to transition cleanly to the handled "Message not found" state.
+- **PocketBase 404 Detection in Message Resolution**: Updated `fetchMessageByIdUncached` to recognize PocketBase's `"wasn't found"` string in missing public records check and prevented spurious warnings when looking up non-existent messages.
+- **Direct Target Message Resolution in Chat View**: Silenced direct message lookup catch blocks in `App.tsx` when opening conversations where a referenced target message has been removed.
+
+## [3.9-realtime-and-bootstrap-warning-cleanup] - 2026-09-17
+### Eliminate false-positive runtime warnings and streamline realtime state management
+- **Realtime Auth & Session Lifecycle**: Realtime subscription handlers (`setupMessagesSubscription`, `setupPrivateMessagesSubscription`, `setupUsersSubscription`) now verify active authentication tokens before connecting, preventing repeated subscription errors during unauthenticated startup or expired token states.
+- **Retry Timeout Hygiene**: Added explicit timeout references (`messageRetryTimeout`, `privateMessageRetryTimeout`, `usersRetryTimeout`) and `clearRealtimeRetryTimeouts` cleanup to prevent stale retry loops upon session change or logout.
+- **Silent Auth Session Expiry Handling**: HTTP 401/403/404 errors during bootstrap queries (`refreshAuth`, `fetchServers`, `fetchChannels`, and subscriptions) now gracefully trigger session cleanup and notify the app through `auth-session-expired` instead of logging noisy `console.warn` error blocks.
+- **Silenced Non-Fatal Diagnostics**: Removed spurious warning logs from schema compatibility fallbacks and optional remote collections (`translations`, `all_servers`, `app_updates`, `notifications`, `app_settings_admin`), ensuring smooth and quiet console navigation.
+
+## [3.9-server-fetching-schema-compatibility-fix] - 2026-09-17
+### Fix "Failed to fetch servers: Something went wrong while processing your request" error
+- Fixed PocketBase schema compatibility detection in `isSchemaCompatibilityError`: PocketBase standard HTTP 400 (`"Something went wrong while processing your request."`), HTTP 404 (`"The requested resource wasn't found."`), and HTTP 422 errors now accurately trigger schema fallback logic rather than re-throwing uncaught errors.
+- Enhanced `fetchServers`: if the legacy `users.in_servers` relation query or `server_members` collection returns a schema/not-found error, the client gracefully falls back to querying the `servers` collection directly, with an additional unsorted query fallback if custom sort fields are unavailable.
+- Auto-joined and returned all available public servers when server memberships are initially empty or when first joining an instance.
+- Improved `fetchChannels` resilience with raw-query fallback if channel sorting fields are absent.
+- Replaced disruptive top-level console error logs on graceful read fallbacks with warnings to prevent triggering spurious app error states.
+
+## [3.9-pagination-scroll-and-voice-latency-fix] - 2026-09-17
+### Standardized 20-message pagination, zero-jump scrolling, and instant voice channel connection
+- Standardized message pagination: initial chat loads exactly 20 messages, and manual or auto-scroll pagination fetches exactly 20 messages (`INITIAL_MESSAGE_PAGE_SIZE = 20`, `OLDER_MESSAGE_PAGE_SIZE = 20`).
+- Fixed skipped messages during history pagination: `cursorFromMessage` excludes optimistic and pending records, ensuring the oldest true server record is used as the pagination cursor without chronological gaps.
+- Prevented offline cache lookups from jumping across history gaps by strictly matching contiguous pages or querying PocketBase directly for consecutive older messages.
+- Eliminated scroll jumps when scrolling or loading older messages: messages within the retained window (up to 500) render directly without artificial top spacer recalculations shifting DOM baselines.
+- Instant voice channel feedback: directly imported `VoicePanel` in `App.tsx` and immediately set the connecting room state in `MediaContext` so the voice stage appears without dynamic chunk delays or blank screens.
+- Fast voice channel switching: streamlined room teardown and room transition logic in `MediaContext` so switching between channels immediately targets the new voice room without resetting to idle or kicking the user back to a text channel.
+
 ## [3.9-chat-dedup-image-and-speed-fix] - 2026-09-17
 ### Fix image loading, double message sending, and chat loading performance
 - Fixed image loading failures by updating `getAttachmentThumbnailUrl` in `src/services/attachmentPreview.ts` to return direct media URLs rather than requesting ungenerated server-side thumbnail query parameters (`thumb=480x480f`) that caused HTTP 404 errors.

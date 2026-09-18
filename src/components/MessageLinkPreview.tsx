@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { CornerDownRight, MessageSquare, Lock, Hash, ArrowUpRight, User as UserIcon, Loader2, FileText, Image as ImageIcon } from 'lucide-react';
+import { CornerDownRight, MessageSquare, Lock, Hash, ArrowUpRight, User as UserIcon, Loader2, FileText, Image as ImageIcon, Trash2 } from 'lucide-react';
 import { Channel, Message, Server, User } from '../types';
 import { pbService } from '../pocketbase';
+import { MessageDeletionService } from '../services/messageDeletionService';
 
 function getSenderAvatar(user?: User) {
   if (user?.avatar) {
@@ -64,30 +65,33 @@ export const MessageLinkPreviewCard: React.FC<MessageLinkPreviewProps> = React.m
   const isAr = activeLang === 'ar';
   const linkData = parseMessageLink(url);
   const [targetMessage, setTargetMessage] = useState<Message | null>(null);
+  const [targetChanName, setTargetChanName] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const isSameServer = React.useMemo(() => {
-    if (!linkData) return false;
-    // If no serverId in link, check if channel exists in current server channels
-    if (!linkData.serverId) {
-      return channels.some((c) => c.id === linkData.channelId);
-    }
-    // If serverId is 'dm', allow DM channel previews
-    if (linkData.serverId === 'dm') {
-      return true;
-    }
-    // Otherwise, check if link's serverId matches current server's ID
-    if (currentServer?.id) {
-      return currentServer.id === linkData.serverId;
-    }
-    return false;
-  }, [linkData, currentServer?.id, channels]);
+  const [isDeleted, setIsDeleted] = useState<boolean>(() => {
+    return Boolean(linkData?.messageId && MessageDeletionService.isMessageDeleted(linkData.messageId));
+  });
 
   useEffect(() => {
-    if (!linkData || !isSameServer) {
+    if (!linkData) {
       setLoading(false);
       return;
+    }
+
+    if (MessageDeletionService.isMessageDeleted(linkData.messageId)) {
+      setIsDeleted(true);
+      setLoading(false);
+      return;
+    }
+
+    // Resolve channel name
+    const foundChan = channels.find((c) => c.id === linkData.channelId);
+    if (foundChan) {
+      setTargetChanName(foundChan.name);
+    } else {
+      pbService.getChannelById(linkData.channelId).then((ch) => {
+        if (ch?.name) setTargetChanName(ch.name);
+      }).catch(() => {});
     }
 
     let isMounted = true;
@@ -97,68 +101,98 @@ export const MessageLinkPreviewCard: React.FC<MessageLinkPreviewProps> = React.m
     pbService
       .getMessageById(linkData.messageId)
       .then((msg) => {
-        if (isMounted) {
+        if (!isMounted) return;
+        if (!msg || msg.deleted || (msg as any).deleted_at || MessageDeletionService.isMessageDeleted(msg.id)) {
+          setIsDeleted(true);
+        } else {
           setTargetMessage(msg);
-          setLoading(false);
+          setIsDeleted(false);
         }
+        setLoading(false);
       })
       .catch((err) => {
-        if (isMounted) {
-          console.warn('Failed to load target message for preview card:', err);
-          setError('Message not found');
-          setLoading(false);
+        if (!isMounted) return;
+        const errMsg = String(err?.message || '').toLowerCase();
+        if (
+          err?.status === 404 ||
+          errMsg.includes('not found') ||
+          errMsg.includes("wasn't found") ||
+          errMsg.includes('deleted')
+        ) {
+          setIsDeleted(true);
+        } else if (err?.status === 401 || err?.status === 403) {
+          setError('No access to message');
+        } else {
+          setError('Message preview unavailable');
         }
+        setLoading(false);
       });
 
     return () => {
       isMounted = false;
     };
-  }, [linkData?.messageId, isSameServer]);
+  }, [linkData?.messageId, linkData?.channelId, channels]);
 
   if (!linkData) return null;
 
-  // Render blocked card if NOT sharing the server
-  if (!isSameServer) {
+  const chanName = targetChanName || channels.find((c) => c.id === linkData.channelId)?.name || 'channel';
+
+  const handleJump = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (isDeleted) return;
+
+    if (onNavigateToMessageLink) {
+      onNavigateToMessageLink(linkData.serverId || currentServer?.id || 'dm', linkData.channelId, linkData.messageId);
+    }
+    if (currentChannelId === linkData.channelId && scrollToMessage) {
+      scrollToMessage(linkData.messageId);
+    }
+  };
+
+  // Render deleted state if message was removed
+  if (isDeleted) {
     return (
-      <div className="message-link-preview-card w-full max-w-md min-h-[118px] rounded-2xl p-3 border shadow-sm my-1.5 flex items-center gap-3 transition-colors select-none bg-[var(--theme-bg-secondary)] border-[var(--theme-border)] text-[var(--theme-text-secondary)]">
-        <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
-          <Lock className="w-4 h-4 text-amber-500" />
+      <div className="message-link-preview-card w-full max-w-lg min-h-[76px] rounded-2xl p-3 border shadow-sm my-2 flex items-center gap-3 select-none bg-[var(--theme-bg-secondary)] border-[var(--theme-border)] text-[var(--theme-text-muted)] opacity-85 transition-colors">
+        <div className="w-9 h-9 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center shrink-0">
+          <Trash2 className="w-4 h-4 text-rose-500" />
         </div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5 font-bold text-xs text-amber-500">
-            <span>{isAr ? 'رابط رسالة من سيرفر آخر' : 'Message Link from Another Server'}</span>
+          <div className="flex items-center gap-1.5 font-bold text-xs text-rose-500">
+            <span>{isAr ? 'رسالة محذوفة' : 'Deleted message'}</span>
+            {chanName && (
+              <span className="text-[10px] text-[var(--theme-text-muted)] font-mono">
+                #{chanName}
+              </span>
+            )}
           </div>
-          <p className="text-[11px] opacity-80 truncate mt-0.5 text-[var(--theme-text-muted)]">
+          <p className="text-[11px] text-[var(--theme-text-muted)] truncate mt-0.5 italic">
             {isAr
-              ? 'معاينة المحتوى مقتصرة على الرسائل من نفس السيرفر'
-              : 'Preview is restricted to messages within the same server'}
+              ? 'تم حذف هذه الرسالة من المحادثة ولا يمكن عرضها'
+              : 'This message was deleted and is no longer available'}
           </p>
         </div>
       </div>
     );
   }
 
-  const targetChanObj = channels.find((c) => c.id === linkData.channelId);
-  const chanName = targetChanObj?.name || 'channel';
+  // Check for image attachment inside targetMessage
+  const rawAtts =
+    targetMessage?.expand?.['attachments(message)'] ||
+    targetMessage?.expand?.['private_attachments(message)'] ||
+    targetMessage?.attachments ||
+    [];
+  const imageAttachment = Array.isArray(rawAtts)
+    ? rawAtts.find((a: any) => {
+        const file = a?.file || '';
+        return /\.(jpe?g|png|gif|webp|svg|bmp)$/i.test(file);
+      })
+    : null;
 
-  const handleJump = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    if (currentChannelId === linkData.channelId && scrollToMessage) {
-      scrollToMessage(linkData.messageId);
-    } else if (onNavigateToMessageLink) {
-      onNavigateToMessageLink(linkData.serverId || currentServer?.id || '', linkData.channelId, linkData.messageId);
-    }
-  };
-
-  // The target message is fetched asynchronously. Keep the preview's
-  // geometry stable while it changes from the loading state to the resolved
-  // state; otherwise every row below it (including date separators) moves
-  // when the sender/content arrives.
   return (
     <div
       onClick={handleJump}
-      className="message-link-preview-card w-full max-w-lg min-h-[118px] rounded-2xl p-3.5 border shadow-md my-2 transition-colors cursor-pointer group bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] hover:bg-[var(--theme-bg-tertiary)] hover:border-accent/40"
+      className="message-link-preview-card w-full max-w-lg min-h-[100px] rounded-2xl p-3.5 border shadow-md my-2 transition-colors cursor-pointer group bg-[var(--theme-bg-card)] border-[var(--theme-border)] text-[var(--theme-text-primary)] hover:bg-[var(--theme-bg-tertiary)] hover:border-accent/40"
     >
       {/* Header Channel Badge & Jump Action */}
       <div className="flex items-center justify-between gap-2 border-b border-[var(--theme-border)] pb-2 mb-2">
@@ -172,10 +206,10 @@ export const MessageLinkPreviewCard: React.FC<MessageLinkPreviewProps> = React.m
         <button
           type="button"
           onClick={handleJump}
-          className="flex items-center gap-1 text-[11px] font-bold text-accent hover:underline bg-accent/10 px-2 py-0.5 rounded-lg border border-accent/20 cursor-pointer shrink-0"
+          className="flex items-center gap-1 text-[11px] font-bold text-accent hover:underline bg-accent/10 px-2.5 py-1 rounded-lg border border-accent/20 cursor-pointer shrink-0 transition-transform active:scale-95"
         >
           <span>{isAr ? 'انتقال' : 'Jump'}</span>
-          <ArrowUpRight className="w-3 h-3" />
+          <ArrowUpRight className="w-3.5 h-3.5" />
         </button>
       </div>
 
@@ -186,10 +220,10 @@ export const MessageLinkPreviewCard: React.FC<MessageLinkPreviewProps> = React.m
         </div>
       ) : error || !targetMessage ? (
         <div className="text-xs text-[var(--theme-text-muted)] italic py-1">
-          {isAr ? 'عذراً، تعذر العثور على الرسالة' : 'Message preview unavailable'}
+          {error || (isAr ? 'عذراً، تعذر العثور على الرسالة' : 'Message preview unavailable')}
         </div>
       ) : (
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-2">
           {/* User info row */}
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 rounded-lg bg-[var(--theme-bg-tertiary)] border border-[var(--theme-border)] overflow-hidden shrink-0 flex items-center justify-center text-[10px] font-bold text-[var(--theme-text-primary)]">
@@ -218,11 +252,30 @@ export const MessageLinkPreviewCard: React.FC<MessageLinkPreviewProps> = React.m
             </p>
           )}
 
+          {/* Image preview if message contains an image attachment */}
+          {imageAttachment && (
+            <div className="pl-8 mt-1">
+              <div className="max-w-[200px] max-h-[140px] rounded-xl overflow-hidden border border-[var(--theme-border)] bg-[var(--theme-bg-tertiary)]">
+                <img
+                  src={`${pbService.getServerUrl()}/api/files/attachments/${imageAttachment.id}/${imageAttachment.file}`}
+                  alt=""
+                  className="w-full h-full object-cover"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </div>
+            </div>
+          )}
+
           {/* Attachment indicator if any */}
-          {(targetMessage.attachments || targetMessage.expand?.['attachments(message)']) && (
+          {rawAtts && rawAtts.length > 0 && !imageAttachment && (
             <div className="flex items-center gap-1 text-[10px] font-semibold text-accent pl-8 mt-0.5">
               <PaperclipIcon className="w-3 h-3" />
-              <span>{isAr ? 'تحتوي على مرفقات' : 'Contains attachments'}</span>
+              <span>
+                {isAr
+                  ? `تحتوي على ${rawAtts.length} مرفق`
+                  : `Contains ${rawAtts.length} attachment${rawAtts.length > 1 ? 's' : ''}`}
+              </span>
             </div>
           )}
         </div>

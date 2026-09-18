@@ -1,7 +1,7 @@
 import { ConversationKind, Message, MessageCursor, MessagePage } from '../types';
 
-export const INITIAL_MESSAGE_PAGE_SIZE = 30;
-export const OLDER_MESSAGE_PAGE_SIZE = 50;
+export const INITIAL_MESSAGE_PAGE_SIZE = 20;
+export const OLDER_MESSAGE_PAGE_SIZE = 20;
 export const MAX_ACTIVE_MESSAGES = 500;
 
 /**
@@ -11,6 +11,7 @@ export const MAX_ACTIVE_MESSAGES = 500;
  */
 export function cursorFromMessage(message: Pick<Message, 'created' | 'id'> | null | undefined): MessageCursor | null {
   if (!message?.id || !message.created) return null;
+  if (message.id.startsWith('optimistic-') || (message as any).is_pending) return null;
   return { created: message.created, id: message.id };
 }
 

@@ -2969,9 +2969,8 @@ function ChatPanel({
       return;
     }
 
-    // Small feeds do not need virtualization. The normal retained window is
-    // 500 rich rows, so it must stay on the measured virtual path.
-    if (total <= 100) {
+    // Feeds up to MAX_ACTIVE_MESSAGES (500) render directly without artificial spacer jumps.
+    if (total <= 500) {
       const current = virtualRangeRef.current;
       if (
         current.startIndex !== 0 ||
@@ -3088,7 +3087,7 @@ function ChatPanel({
 
   const { startIndex, endIndex, topSpacerHeight, bottomSpacerHeight } =
     React.useMemo(() => {
-      if (totalMessagesCount <= 100) {
+      if (totalMessagesCount <= 500) {
         return {
           startIndex: 0,
           endIndex: Math.max(0, totalMessagesCount - 1),
@@ -3764,56 +3763,51 @@ function ChatPanel({
           mediaPreviews.push({ type: "web", url: fullUrl });
         }
 
-        const hasPreview = true;
+        const shortenUrlDisplay = (urlStr: string): string => {
+          try {
+            const urlObj = new URL(
+              urlStr.startsWith("http") ? urlStr : "https://" + urlStr,
+            );
+            const host = urlObj.hostname.replace(/^www\./, "");
+            const path = urlObj.pathname + urlObj.search;
+            const shortPath =
+              path.length > 28 ? path.substring(0, 25) + "…" : path;
+            return `${host}${shortPath === "/" ? "" : shortPath}`;
+          } catch {
+            return urlStr.length > 35
+              ? urlStr.substring(0, 32) + "…"
+              : urlStr;
+          }
+        };
 
-        // If link has a media preview, hide the raw URL text string from the message body
-        if (!hasPreview) {
-          const shortenUrlDisplay = (urlStr: string): string => {
-            try {
-              const urlObj = new URL(
-                urlStr.startsWith("http") ? urlStr : "https://" + urlStr,
-              );
-              const host = urlObj.hostname.replace(/^www\./, "");
-              const path = urlObj.pathname + urlObj.search;
-              const shortPath =
-                path.length > 20 ? path.substring(0, 18) + "…" : path;
-              return `${host}${shortPath === "/" ? "" : shortPath}`;
-            } catch {
-              return urlStr.length > 30
-                ? urlStr.substring(0, 28) + "…"
-                : urlStr;
+        const displayLabel = shortenUrlDisplay(matchText);
+
+        parts.push(
+          <a
+            key={`url-${matchIndex}`}
+            href={fullUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={
+              lang === "ar"
+                ? `رابط: ${fullUrl} (انقر للفتح، أو Shift+انقر للنسخ)`
+                : `URL: ${fullUrl} (Click to open, Shift+Click to copy)`
             }
-          };
-
-          const displayLabel = shortenUrlDisplay(matchText);
-
-          parts.push(
-            <a
-              key={`url-${matchIndex}`}
-              href={fullUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={
-                lang === "ar"
-                  ? `رابط كامل: ${fullUrl} (انقر للفتح، أو انقر مزدوجاً للنسخ)`
-                  : `Full URL: ${fullUrl} (Click to open, Shift+Click to copy)`
-              }
-              onClick={(e) => {
-                e.stopPropagation();
-                if (e.shiftKey) {
-                  e.preventDefault();
-                  navigator.clipboard.writeText(fullUrl);
-                  return;
-                }
+            onClick={(e) => {
+              e.stopPropagation();
+              if (e.shiftKey) {
                 e.preventDefault();
-                openExternalUrl(fullUrl);
-              }}
-              className="text-cyan-400 hover:text-cyan-300 font-bold underline underline-offset-2 cursor-pointer transition-colors mx-0.5 inline-flex items-center gap-1 group"
-            >
-              <span>{displayLabel}</span>
-            </a>,
-          );
-        }
+                navigator.clipboard.writeText(fullUrl);
+                return;
+              }
+              e.preventDefault();
+              openExternalUrl(fullUrl);
+            }}
+            className="text-accent hover:underline font-medium underline-offset-2 cursor-pointer transition-colors mx-0.5 inline-flex items-center gap-1 group break-all"
+          >
+            <span>{displayLabel}</span>
+          </a>,
+        );
       }
 
       lastIndex = combinedRegex.lastIndex;

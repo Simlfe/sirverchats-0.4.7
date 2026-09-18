@@ -395,27 +395,7 @@ class OfflineCacheService {
     if (!before) return null;
     const exact = await this.getMessagePage(kind, conversationId, before);
     if (exact) return exact;
-
-    // A realtime insertion can move a capped window's oldest row by one, so
-    // its exact request cursor may no longer match a stored page key. This is
-    // a compatibility fallback; the full page set is hydrated once and then
-    // retained in memory, while ordinary pagination stays on the exact O(1)
-    // lookup above.
-    const pages = await this.listMessagePages(kind, conversationId);
-    let closest: CachedMessagePage | null = null;
-    let closestNewest: Message | null = null;
-    for (const page of pages) {
-      const olderItems = page.items
-        .filter((message) => compareMessageOrder(message, before) < 0)
-        .sort(compareMessageOrder);
-      const newestOlder = olderItems[olderItems.length - 1];
-      if (!newestOlder) continue;
-      if (!closestNewest || compareMessageOrder(newestOlder, closestNewest) > 0) {
-        closestNewest = newestOlder;
-        closest = { ...page, items: olderItems };
-      }
-    }
-    return closest;
+    return null;
   }
 
   async saveMessagePage(

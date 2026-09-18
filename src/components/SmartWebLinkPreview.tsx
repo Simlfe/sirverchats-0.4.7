@@ -143,22 +143,11 @@ export const SmartWebLinkPreview: React.FC<SmartWebLinkPreviewProps> = React.mem
       });
     };
 
-    let timer: any = null;
-    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
-      const handle = (window as any).requestIdleCallback(runFetch, { timeout: 1500 });
-      return () => {
-        active = false;
-        if (typeof window !== "undefined" && "cancelIdleCallback" in window) {
-          (window as any).cancelIdleCallback(handle);
-        }
-      };
-    } else {
-      timer = setTimeout(runFetch, 100);
-      return () => {
-        active = false;
-        if (timer) clearTimeout(timer);
-      };
-    }
+    const timer = setTimeout(runFetch, 10);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
   }, [url]);
 
   const handleOpen = (e: React.MouseEvent) => {
@@ -207,34 +196,36 @@ export const SmartWebLinkPreview: React.FC<SmartWebLinkPreviewProps> = React.mem
 
       {/* Main Content Area */}
       <div className="flex flex-col gap-2">
-        {/* Keep a fixed media slot even while metadata is loading (or when
-            the target has no image). Without this reservation, a late image
-            response changes the card height and shifts every following row. */}
-        <div className="w-full h-40 sm:h-44 rounded-xl overflow-hidden bg-[var(--theme-bg-tertiary)] border border-[var(--theme-border)] relative shrink-0 flex items-center justify-center">
-          {data?.image && !imgError ? (
-            <img
-              src={data.image}
-              alt=""
-              className="w-full h-full object-cover group-hover:scale-102 transition-transform duration-300"
-              loading="lazy"
-              decoding="async"
-              onError={() => setImgError(true)}
-              referrerPolicy="no-referrer"
-            />
-          ) : (
-            <Globe className="w-10 h-10 text-accent/30" aria-hidden="true" />
-          )}
-        </div>
+        {/* Only render image container if image is present or currently loading */}
+        {(loading || (data?.image && !imgError)) && (
+          <div className="w-full h-36 sm:h-40 rounded-xl overflow-hidden bg-[var(--theme-bg-tertiary)] border border-[var(--theme-border)] relative shrink-0 flex items-center justify-center">
+            {data?.image && !imgError ? (
+              <img
+                src={data.image}
+                alt=""
+                className="w-full h-full object-cover group-hover:scale-102 transition-transform duration-300"
+                loading="lazy"
+                decoding="async"
+                onError={() => setImgError(true)}
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <Globe className="w-8 h-8 text-accent/30 animate-pulse" aria-hidden="true" />
+            )}
+          </div>
+        )}
 
         <div className="flex items-start justify-between gap-3">
           <div className="flex flex-col gap-1 min-w-0 flex-1">
-            <span className="text-xs sm:text-sm font-extrabold text-[var(--theme-text-primary)] group-hover:text-accent transition-colors line-clamp-2 leading-snug min-h-[2.25rem]">
+            <span className="text-xs sm:text-sm font-extrabold text-[var(--theme-text-primary)] group-hover:text-accent transition-colors line-clamp-2 leading-snug">
               {titleDisplay}
             </span>
-            <p className="text-[11px] text-[var(--theme-text-muted)] line-clamp-2 leading-relaxed min-h-[2rem]">
-              {data?.description || "\u00a0"}
-            </p>
-            <span className="text-[10px] font-mono text-[var(--theme-text-muted)] truncate opacity-80 pt-0.5 min-h-[1rem]">
+            {data?.description && (
+              <p className="text-[11px] text-[var(--theme-text-muted)] line-clamp-2 leading-relaxed">
+                {data.description}
+              </p>
+            )}
+            <span className="text-[10px] font-mono text-[var(--theme-text-muted)] truncate opacity-80 pt-0.5">
               {data?.url || url}
             </span>
           </div>

@@ -95,41 +95,36 @@ async function prepareRoomJoin(config: RoomConfig): Promise<RoomConfig> {
     sessionId: config.sessionId || createVoiceSessionId(),
     joinStartedAtMs,
   };
-  const microphoneTask = acquireMicrophoneForJoin().then((result) => {
-    console.info('[VOICE_JOIN_TIMING]', {
-      phase: result.granted ? 'microphone_ready' : 'microphone_failed',
-      durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - joinStartedAtMs),
+  const microphoneTask = acquireMicrophoneForJoin()
+    .then((result) => {
+      console.info('[VOICE_JOIN_TIMING]', {
+        phase: result.granted ? 'microphone_ready' : 'microphone_failed',
+        durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - joinStartedAtMs),
+      });
+      return result;
+    })
+    .catch((err) => {
+      console.warn('[VOICE_JOIN_TIMING] Microphone acquisition failed:', err);
+      return { granted: false, track: null, error: String(err?.message || err) };
     });
-    return result;
-  });
+
   const preflightTask = realtimeMediaProvider.preflightRoom(preparedConfig).then(() => {
     console.info('[VOICE_JOIN_TIMING]', {
       phase: 'code_and_token_ready',
       durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - joinStartedAtMs),
     });
+  }).catch((err) => {
+    console.warn('[VOICE_JOIN_TIMING] Preflight room notice:', err);
   });
-  const [microphoneResult, preflightResult] = await Promise.allSettled([
+
+  const [microphoneResult] = await Promise.allSettled([
     microphoneTask,
     preflightTask,
   ]);
 
   const microphone = microphoneResult.status === 'fulfilled' ? microphoneResult.value : null;
-  if (preflightResult.status === 'rejected') {
-    microphone?.track?.stop();
-    throw preflightResult.reason;
-  }
-  if (!microphone || !microphone.granted || !microphone.track) {
-    const error = new Error(
-      microphone?.error ||
-        (microphoneResult.status === 'rejected'
-          ? String(microphoneResult.reason)
-          : 'Microphone permission was not granted.')
-    );
-    (error as any).code = 'PERMISSION_DENIED';
-    throw error;
-  }
 
-  return { ...preparedConfig, initialMicrophoneTrack: microphone.track };
+  return { ...preparedConfig, initialMicrophoneTrack: microphone?.track || undefined };
 }
 
 export const MediaProvider: React.FC<{
@@ -309,6 +304,10 @@ export const MediaProvider: React.FC<{
             realtimeMediaProvider.leaveRoom().catch(() => {});
           }
         } else if (evt.type === 'room_left') {
+          if (joiningRoomIdRef.current) {
+            // A new room join or switch is currently in flight; do not clear state or drop to idle
+            return;
+          }
           setActiveRoom(null);
           setParticipants([]);
           setConnectionState('idle');
@@ -587,12 +586,8 @@ export const MediaProvider: React.FC<{
           return;
         }
 
-        if (activeRoom && activeRoom.roomId !== channel.id) {
-          if (activeRoom.callId) {
-            callSignalingService.endCall(activeRoom.callId);
-          }
-          await realtimeMediaProvider.leaveRoom();
-        }
+        const previousRoom = activeRoom;
+        const isSwitching = previousRoom && previousRoom.roomId !== channel.id;
 
         const config: RoomConfig = {
           roomId: channel.id,
@@ -605,6 +600,25 @@ export const MediaProvider: React.FC<{
           serverId: channel.server,
           sessionId: createVoiceSessionId(),
         };
+
+        // Immediately set the active room and connecting state so UI displays the voice stage instantly
+        setActiveRoom(config);
+        setConnectionState('connecting');
+
+        if (isSwitching) {
+          if (previousRoom.callId) {
+            callSignalingService.endCall(previousRoom.callId);
+          }
+          try {
+            await realtimeMediaProvider.leaveRoom();
+          } catch (e) {
+            console.warn('Previous room teardown warning during channel switch:', e);
+          }
+          // Re-affirm the new channel config and connecting state in case leaveRoom fired events
+          setActiveRoom(config);
+          setConnectionState('connecting');
+          setParticipants([]);
+        }
 
         // Microphone acquisition, lazy LiveKit loading and token acquisition
         // begin together after the explicit Join click.

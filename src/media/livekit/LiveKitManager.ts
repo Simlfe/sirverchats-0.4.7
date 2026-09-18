@@ -253,14 +253,21 @@ export class LiveKitManager {
   public resolveTokenEndpoints(primaryEndpoint: string = this.tokenEndpoint || ENDPOINTS.LIVEKIT_TOKEN_ENDPOINT): string[] {
     const endpointsToTry: string[] = [];
     const isBrowser = typeof window !== 'undefined' && typeof window.location !== 'undefined' && Boolean(window.location.protocol?.startsWith('http'));
-    const isLocalDevelopment =
-      isBrowser &&
-      (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+    const isLocalhost = isBrowser && Boolean(
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1' ||
+      window.location.hostname === '[::1]'
+    );
 
-    if (isLocalDevelopment) {
+    if (isLocalhost) {
       endpointsToTry.push('/livekit/token');
+      if (primaryEndpoint && !endpointsToTry.includes(primaryEndpoint)) {
+        endpointsToTry.push(primaryEndpoint);
+      }
+      return endpointsToTry;
     }
-    if (primaryEndpoint && !endpointsToTry.includes(primaryEndpoint)) {
+
+    if (primaryEndpoint) {
       endpointsToTry.push(primaryEndpoint);
     }
     return endpointsToTry;

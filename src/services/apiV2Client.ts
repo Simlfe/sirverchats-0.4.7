@@ -111,7 +111,7 @@ export class ApiV2Client {
     return this.request<BootstrapResponse>(`/bootstrap${queryString({ serverId })}`, {}, { timeoutMs: 15000 });
   }
 
-  messages<T extends Message = Message>(kind: 'channel' | 'dm', id: string, limit = 30, cursor?: MessageCursor | null): Promise<MessagePage<T>> {
+  messages<T extends Message = Message>(kind: 'channel' | 'dm', id: string, limit = 20, cursor?: MessageCursor | null): Promise<MessagePage<T>> {
     // The gateway accepts the shared `{created,id}` cursor contract while
     // keeping the query names explicit for older reverse-proxy deployments.
     // Sending both fields also avoids URL-encoding a JSON object and remains

@@ -30,10 +30,36 @@ export class PocketBaseUnavailableError extends Error {
  * requests while the backend is offline.
  */
 function isSchemaCompatibilityError(error: any): boolean {
-  const status = Number(error?.status || error?.response?.code || 0);
-  const message = String(error?.message || error?.response?.message || error?.responseText || '').toLowerCase();
-  if (![400, 404, 422].includes(status)) return false;
-  return /(?:collection|field|relation|expand|unknown\s+(?:field|collection|relation)|missing\s+(?:field|collection|relation)|does not exist|invalid schema|invalid filter)/.test(message);
+  if (!error) return false;
+  if (error.isAbort || error.name === 'AbortError') return false;
+
+  const status = Number(error.status || error.response?.code || 0);
+  // Transport, timeout, and server outage errors (status 0, 408, >= 500) are never schema errors
+  if (status === 0 || status === 408 || status >= 500) return false;
+
+  const message = String(error.message || error.response?.message || error.responseText || '').toLowerCase();
+  if (message.includes('failed to fetch') || message.includes('network error') || message.includes('timeout') || message.includes('networkerror')) {
+    return false;
+  }
+
+  // 404 means the requested collection or record does not exist on this backend
+  if (status === 404) return true;
+
+  if (status === 400 || status === 422) {
+    const dataStr = JSON.stringify(error.response?.data || error.data || '').toLowerCase();
+    const fullText = `${message} ${dataStr}`;
+
+    // Standard PocketBase error strings and schema mismatch indicators
+    if (
+      message.includes('something went wrong while processing your request') ||
+      message.includes("the requested resource wasn't found") ||
+      /(?:collection|field|relation|expand|filter|sort|unknown|missing|invalid|syntax|does not exist|not found|validation)/.test(fullText)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 let cachedMessageExpand = 'sender,reply_to,attachments(message),private_attachments(message)';
@@ -592,6 +618,24 @@ class PocketBaseService {
   private serverMembersPromises: Map<string, Promise<ServerMember[]>> = new Map();
   private activeReadDeadlineAborts: Map<string, (error: any) => void> = new Map();
   private loginCooldownUntil: number = 0;
+  private messageRetryTimeout: any = null;
+  private privateMessageRetryTimeout: any = null;
+  private usersRetryTimeout: any = null;
+
+  private clearRealtimeRetryTimeouts() {
+    if (this.messageRetryTimeout) {
+      clearTimeout(this.messageRetryTimeout);
+      this.messageRetryTimeout = null;
+    }
+    if (this.privateMessageRetryTimeout) {
+      clearTimeout(this.privateMessageRetryTimeout);
+      this.privateMessageRetryTimeout = null;
+    }
+    if (this.usersRetryTimeout) {
+      clearTimeout(this.usersRetryTimeout);
+      this.usersRetryTimeout = null;
+    }
+  }
 
   getLoginCooldownRemaining(): number {
     const remaining = this.loginCooldownUntil - Date.now();
@@ -970,41 +1014,55 @@ class PocketBaseService {
     };
 
     pbInstance.afterSend = (response, data) => {
-      if (response.status === 400 && typeof data?.message === 'string' && data.message.includes("authorization don't match")) {
-        console.warn('PocketBase auth mismatch detected. Resetting realtime SSE connection.');
+      const isAuthMismatch =
+        response.status === 400 &&
+        typeof data?.message === 'string' &&
+        data.message.includes("authorization don't match");
+
+      if (isAuthMismatch) {
         try {
           pbInstance.realtime.unsubscribe().catch(() => {});
         } catch (e) {}
         try {
           pbInstance.cancelAllRequests();
         } catch (e) {}
-        setTimeout(() => {
-          this.resubscribeAllRealtime();
-        }, 100);
+        if (this.pb.authStore.isValid && this.pb.authStore.token) {
+          setTimeout(() => {
+            this.resubscribeAllRealtime();
+          }, 100);
+        }
       }
       return data;
     };
 
     pbInstance.authStore.onChange(() => {
+      this.clearRealtimeRetryTimeouts();
       try {
         pbInstance.cancelAllRequests();
       } catch (e) {}
       try {
         pbInstance.realtime.unsubscribe().catch(() => {});
       } catch (e) {}
-      // Automatically re-establish subscriptions with updated credentials
-      setTimeout(() => {
-        this.resubscribeAllRealtime();
-      }, 100);
+      // Automatically re-establish subscriptions only when we have valid credentials
+      if (pbInstance.authStore.isValid && pbInstance.authStore.token) {
+        setTimeout(() => {
+          this.resubscribeAllRealtime();
+        }, 100);
+      }
     });
   }
 
   public resubscribeAllRealtime() {
+    this.clearRealtimeRetryTimeouts();
     this.messagesSubscribed = false;
     this.attachmentsSubscribed = false;
     this.privateMessagesSubscribed = false;
     this.privateAttachmentsSubscribed = false;
     this.usersSubscribed = false;
+
+    if (!this.pb.authStore.isValid || !this.pb.authStore.token) {
+      return;
+    }
 
     if (this.messageListeners.size > 0) {
       this.setupMessagesSubscription();
@@ -1176,12 +1234,13 @@ class PocketBaseService {
       const authData = await this.pb.collection('users').authRefresh();
       return authData.record as any as User;
     } catch (err: any) {
-      console.warn('PocketBase auth refresh failed:', err);
       const isAuthError =
         err?.status === 401 ||
         err?.status === 403 ||
         err?.status === 400 ||
-        String(err?.message || '').toLowerCase().includes('authenticate');
+        err?.status === 404 ||
+        String(err?.message || '').toLowerCase().includes('authenticate') ||
+        String(err?.message || '').toLowerCase().includes('something went wrong');
 
       if (isAuthError) {
         this.logout();
@@ -1226,6 +1285,16 @@ class PocketBaseService {
       localStorage.removeItem('demo_user');
       return;
     }
+    this.clearRealtimeRetryTimeouts();
+    this.messagesSubscribed = false;
+    this.attachmentsSubscribed = false;
+    this.privateMessagesSubscribed = false;
+    this.privateAttachmentsSubscribed = false;
+    this.usersSubscribed = false;
+    this.messageListeners.clear();
+    this.privateMessageListeners.clear();
+    this.userListeners.clear();
+
     try {
       this.pb.cancelAllRequests();
     } catch (e) {}
@@ -1399,7 +1468,7 @@ class PocketBaseService {
             return directInServers;
           }
         }
-      } catch (fastErr) {
+      } catch (fastErr: any) {
         if (!isSchemaCompatibilityError(fastErr)) throw fastErr;
         // The legacy users.in_servers expansion is unavailable; continue to
         // the indexed server_members query only for this confirmed mismatch.
@@ -1415,24 +1484,37 @@ class PocketBaseService {
           }),
           'bootstrap:servers:members',
         );
-      } catch (innerErr) {
+      } catch (innerErr: any) {
         if (!isSchemaCompatibilityError(innerErr)) throw innerErr;
-        console.warn('server_members schema is unavailable; trying servers collection directly:', innerErr);
         // Fallback: fetch directly from 'servers' collection
-        const directServers = await this.withReadDeadline(
-          () => this.pb.collection('servers').getFullList({
-            sort: '-created',
-            requestKey: 'bootstrap:servers:direct',
-          }),
-          'bootstrap:servers:direct',
-        );
+        let directServers: any[] = [];
+        try {
+          directServers = await this.withReadDeadline(
+            () => this.pb.collection('servers').getFullList({
+              sort: '-created',
+              requestKey: 'bootstrap:servers:direct',
+            }),
+            'bootstrap:servers:direct',
+          );
+        } catch (sortErr: any) {
+          if (isSchemaCompatibilityError(sortErr)) {
+            directServers = await this.withReadDeadline(
+              () => this.pb.collection('servers').getFullList({
+                requestKey: 'bootstrap:servers:direct:unsorted',
+              }),
+              'bootstrap:servers:direct:unsorted',
+            );
+          } else {
+            throw sortErr;
+          }
+        }
         const list = directServers as any as Server[];
         list.forEach((s) => {
           const { cleanText, cooldown } = extractCooldown(s.description);
           s.description = cleanText;
           s.cooldown = cooldown || this.getLocalServerCooldown(s.id);
         });
-        return list;
+        return list.filter((s) => !isDmServer(s));
       }
 
       const servers = records
@@ -1440,7 +1522,7 @@ class PocketBaseService {
         .map((r) => r.expand!.server as any as Server)
         .filter((s) => !isDmServer(s));
       
-      // If user has no servers joined on this real instance, join a default one or create one
+      // If user has no servers joined on this real instance, join a default one or fetch available servers
       if (servers.length === 0) {
         // Fetch all public servers
         try {
@@ -1455,9 +1537,9 @@ class PocketBaseService {
             try {
               await this.joinServer(firstServer.id);
             } catch (joinErr) {
-              console.warn('Could not auto-join first public server:', joinErr);
+              // Silently ignore auto-join failures
             }
-            const list = [firstServer as any as Server];
+            const list = validPublicServers as any as Server[];
             list.forEach((s) => {
               const { cleanText, cooldown } = extractCooldown(s.description);
               s.description = cleanText;
@@ -1466,7 +1548,7 @@ class PocketBaseService {
             return list;
           }
         } catch (e) {
-          console.warn('Could not fetch public servers:', e);
+          // Public servers query fallback silently
         }
       }
       servers.forEach((s) => {
@@ -1475,12 +1557,7 @@ class PocketBaseService {
         s.cooldown = cooldown || this.getLocalServerCooldown(s.id);
       });
       return servers.filter((s) => !isDmServer(s));
-    } catch (err) {
-      console.error('Failed to fetch servers:', err);
-      // Server bootstrap is an enhancement when the v2 gateway is enabled.
-      // Keep gateway availability owned by the v2 client; a background
-      // compatibility read must not paint the app offline while cached data is
-      // still usable.
+    } catch (err: any) {
       return [];
     }
   }
@@ -1870,15 +1947,26 @@ class PocketBaseService {
         return channels;
       } catch (e) {
         if (!isSchemaCompatibilityError(e)) throw e;
-        console.warn("Retrying fetchChannels without position sort key:", e);
-        const list = await this.withReadDeadline(
-          () => this.pb.collection('channels').getFullList({
-            filter: `server = "${serverId}"`,
-            sort: 'created',
-            requestKey: `bootstrap:channels:${serverId}:legacy`,
-          }),
-          `bootstrap:channels:${serverId}:legacy`,
-        );
+        let list: any[] = [];
+        try {
+          list = await this.withReadDeadline(
+            () => this.pb.collection('channels').getFullList({
+              filter: `server = "${serverId}"`,
+              sort: 'created',
+              requestKey: `bootstrap:channels:${serverId}:legacy`,
+            }),
+            `bootstrap:channels:${serverId}:legacy`,
+          );
+        } catch (e2) {
+          if (!isSchemaCompatibilityError(e2)) throw e2;
+          list = await this.withReadDeadline(
+            () => this.pb.collection('channels').getFullList({
+              filter: `server = "${serverId}"`,
+              requestKey: `bootstrap:channels:${serverId}:raw`,
+            }),
+            `bootstrap:channels:${serverId}:raw`,
+          );
+        }
         const channels = list as any as Channel[];
         channels.forEach((c) => {
           const { cleanText, cooldown } = extractCooldown(c.topic);
@@ -1889,8 +1977,7 @@ class PocketBaseService {
         this.setCachedChannels(serverId, channels);
         return channels;
       }
-    } catch (err) {
-      console.error('Failed to fetch channels:', err);
+    } catch (err: any) {
       // Preserve cached channels without changing the global gateway status.
       return this.getCachedChannels(serverId);
     }
@@ -2243,7 +2330,7 @@ class PocketBaseService {
       // not fall through to the private collection for transport/timeout/
       // 5xx errors, which previously created a retry waterfall during an
       // outage.
-      const missingPublicRecord = status === 404 && /not found|does not exist|missing/.test(message);
+      const missingPublicRecord = status === 404 || /not found|wasn't found|does not exist|missing/i.test(message);
       if (!missingPublicRecord) {
         throw new PocketBaseUnavailableError(
           err?.message || 'The chat service is temporarily unavailable',
@@ -2288,7 +2375,14 @@ class PocketBaseService {
       this.cacheMessageRecord(message);
       return message;
     } catch (privateError: any) {
-      console.warn('Failed to fetch message by id:', messageId, publicError);
+      const isNotFound =
+        privateError?.status === 404 ||
+        publicError?.status === 404 ||
+        /not found|wasn't found|does not exist|missing/i.test(privateError?.message || '') ||
+        /not found|wasn't found|does not exist|missing/i.test(publicError?.message || '');
+      if (!isNotFound) {
+        console.warn('Failed to fetch message by id:', messageId, publicError);
+      }
       throw privateError || publicError;
     }
   }
@@ -2904,11 +2998,11 @@ class PocketBaseService {
   private attachmentsSubscribed = false;
 
   private setupMessagesSubscription() {
-    if (this.messagesSubscribed || this.isDemo) return;
+    if (this.messagesSubscribed || this.isDemo || !this.pb.authStore.isValid || !this.pb.authStore.token) return;
     this.messagesSubscribed = true;
 
     try {
-    this.pb.collection('messages').subscribe('*', (e) => {
+      this.pb.collection('messages').subscribe('*', (e) => {
         // Emit exactly one normalized event. PocketBase realtime records carry
         // the message payload; callers resolve optional relations from their
         // local user/message caches instead of refetching the same record.
@@ -2921,34 +3015,34 @@ class PocketBaseService {
               } : e.record;
               this.cacheMessageRecord(record as unknown as Message);
               callback({ ...e, record });
-            } catch (cbErr) {
-              console.warn('[REALTIME] Error in message callback:', cbErr);
-            }
+            } catch (cbErr) {}
           }
         });
       }).catch((err) => {
         this.messagesSubscribed = false;
-        console.warn('[REALTIME] Messages subscribe error, retrying in 2s:', err);
-        setTimeout(() => {
-          if (this.messageListeners.size > 0 && !this.messagesSubscribed) {
+        if (!this.pb.authStore.isValid || !this.pb.authStore.token) return;
+        if (this.messageRetryTimeout) clearTimeout(this.messageRetryTimeout);
+        this.messageRetryTimeout = setTimeout(() => {
+          if (this.messageListeners.size > 0 && !this.messagesSubscribed && this.pb.authStore.isValid && this.pb.authStore.token) {
             this.setupMessagesSubscription();
           }
-        }, 2000);
+        }, 5000);
       });
     } catch (err) {
       this.messagesSubscribed = false;
-      console.warn('[REALTIME] Could not subscribe to messages collection, retrying in 2s:', err);
-      setTimeout(() => {
-        if (this.messageListeners.size > 0 && !this.messagesSubscribed) {
+      if (!this.pb.authStore.isValid || !this.pb.authStore.token) return;
+      if (this.messageRetryTimeout) clearTimeout(this.messageRetryTimeout);
+      this.messageRetryTimeout = setTimeout(() => {
+        if (this.messageListeners.size > 0 && !this.messagesSubscribed && this.pb.authStore.isValid && this.pb.authStore.token) {
           this.setupMessagesSubscription();
         }
-      }, 2000);
+      }, 5000);
     }
 
     // Attachments arrive as separate records in PocketBase. Merge them into
     // the most recent parent message locally; never perform a getOne() for
     // every upload just to rediscover the message we already received.
-    if (!this.attachmentsSubscribed) {
+    if (!this.attachmentsSubscribed && this.pb.authStore.isValid && this.pb.authStore.token) {
       this.attachmentsSubscribed = true;
       try {
         this.pb.collection('attachments').subscribe('*', (e) => {
@@ -3003,11 +3097,17 @@ class PocketBaseService {
 
     const listenerObj = { channelId, callback };
     this.messageListeners.add(listenerObj);
-    this.setupMessagesSubscription();
+    if (this.pb.authStore.isValid && this.pb.authStore.token) {
+      this.setupMessagesSubscription();
+    }
 
     return () => {
       this.messageListeners.delete(listenerObj);
       if (this.messageListeners.size === 0) {
+        if (this.messageRetryTimeout) {
+          clearTimeout(this.messageRetryTimeout);
+          this.messageRetryTimeout = null;
+        }
         this.messagesSubscribed = false;
         try {
           this.pb.collection('messages').unsubscribe('*').catch(() => {});
@@ -3062,7 +3162,6 @@ class PocketBaseService {
       });
       return records as any as Translation[];
     } catch (err) {
-      console.warn('Failed to fetch translations from PB, using fallback dictionary.', err);
       return [];
     }
   }
@@ -3467,7 +3566,6 @@ class PocketBaseService {
         // shape; cached profiles remain sufficient for the read-only shell.
         if (!isSchemaCompatibilityError(e)) {
           if (this.usersCache) return this.usersCache;
-          console.warn('Failed to fetch users:', e);
           return [];
         }
         try {
@@ -3480,7 +3578,6 @@ class PocketBaseService {
           return this.usersCache;
         } catch (innerErr) {
           if (this.usersCache) return this.usersCache;
-          console.warn('Failed to fetch users:', e);
           return [];
         }
       }
@@ -3594,7 +3691,6 @@ class PocketBaseService {
       const records = await this.pb.collection('servers').getFullList();
       return records as any as Server[];
     } catch (e) {
-      console.warn('Failed to fetch all servers:', e);
       return [];
     }
   }
@@ -3608,7 +3704,6 @@ class PocketBaseService {
       });
       return records as any as AppUpdateRecord[];
     } catch (e) {
-      console.warn('Failed to fetch app updates from PocketBase:', e);
       return [];
     }
   }
@@ -3688,14 +3783,12 @@ class PocketBaseService {
       } catch (e) {}
       return ids;
     } catch (e) {
-      console.warn('Failed to fetch Pinned_messages from channel record:', e);
       return this.getPinnedMessageIds(channelId);
     }
   }
 
   async togglePinMessage(channelId: string, messageId: string, isDm: boolean = false): Promise<boolean> {
     if (isDm || !channelId || channelId.startsWith('dm-') || channelId.startsWith('chat-') || channelId.startsWith('private-')) {
-      console.warn('Pinned messages are not allowed in DMs.');
       return false;
     }
 
@@ -3728,9 +3821,7 @@ class PocketBaseService {
           await this.pb.collection('channels').update(channelId, {
             pinned_messages: updatedPins
           });
-        } catch (e2) {
-          console.warn('Failed updating Pinned_messages on channels collection:', e2);
-        }
+        } catch (e2) {}
       }
 
       this.pinnedCache.set(channelId, updatedPins);
@@ -3740,7 +3831,6 @@ class PocketBaseService {
 
       return !isPinned;
     } catch (e) {
-      console.warn('Failed to toggle pin message in channel record:', e);
       return false;
     }
   }
@@ -3857,7 +3947,6 @@ class PocketBaseService {
       return validServers;
     } catch (membershipError) {
       if (!isSchemaCompatibilityError(membershipError)) {
-        console.warn('Failed to fetch private chat memberships:', membershipError);
         return cachedServers;
       }
       membershipSchemaAvailable = false;
@@ -3878,7 +3967,6 @@ class PocketBaseService {
         );
       } catch (usersFilterErr) {
         if (!isSchemaCompatibilityError(usersFilterErr)) {
-          console.warn('Failed to fetch private chat servers:', usersFilterErr);
           return cachedServers;
         }
         try {
@@ -4123,7 +4211,6 @@ class PocketBaseService {
       }
       return processed;
     } catch (err) {
-      console.warn('private_messages query error, using fallback:', err);
       if (!currentId || !recipientId) return [];
       try {
         const fallback = await this.pb.collection('private_messages').getFullList({
@@ -4224,11 +4311,11 @@ class PocketBaseService {
   private privateAttachmentsSubscribed = false;
 
   private setupPrivateMessagesSubscription() {
-    if (this.privateMessagesSubscribed || this.isDemo) return;
+    if (this.privateMessagesSubscribed || this.isDemo || !this.pb.authStore.isValid || !this.pb.authStore.token) return;
     this.privateMessagesSubscribed = true;
 
     try {
-    this.pb.collection('private_messages').subscribe('*', (e) => {
+      this.pb.collection('private_messages').subscribe('*', (e) => {
         // As with public messages, deliver one event only. This avoids the
         // raw+expanded+delayed fetch waterfall that previously amplified DM
         // traffic on every create.
@@ -4238,31 +4325,31 @@ class PocketBaseService {
               const record = e.record ? { ...e.record, expand: e.record.expand || {} } : e.record;
               this.cacheMessageRecord(record as unknown as Message);
               callback({ ...e, record });
-            } catch (cbErr) {
-              console.warn('[REALTIME] Error in DM callback:', cbErr);
-            }
+            } catch (cbErr) {}
           }
         });
       }).catch((err) => {
         this.privateMessagesSubscribed = false;
-        console.warn('[REALTIME] Private messages subscribe error, retrying in 2s:', err);
-        setTimeout(() => {
-          if (this.privateMessageListeners.size > 0 && !this.privateMessagesSubscribed) {
+        if (!this.pb.authStore.isValid || !this.pb.authStore.token) return;
+        if (this.privateMessageRetryTimeout) clearTimeout(this.privateMessageRetryTimeout);
+        this.privateMessageRetryTimeout = setTimeout(() => {
+          if (this.privateMessageListeners.size > 0 && !this.privateMessagesSubscribed && this.pb.authStore.isValid && this.pb.authStore.token) {
             this.setupPrivateMessagesSubscription();
           }
-        }, 2000);
+        }, 5000);
       });
     } catch (e) {
       this.privateMessagesSubscribed = false;
-      console.warn('[REALTIME] Subscribe to private_messages error, retrying in 2s:', e);
-      setTimeout(() => {
-        if (this.privateMessageListeners.size > 0 && !this.privateMessagesSubscribed) {
+      if (!this.pb.authStore.isValid || !this.pb.authStore.token) return;
+      if (this.privateMessageRetryTimeout) clearTimeout(this.privateMessageRetryTimeout);
+      this.privateMessageRetryTimeout = setTimeout(() => {
+        if (this.privateMessageListeners.size > 0 && !this.privateMessagesSubscribed && this.pb.authStore.isValid && this.pb.authStore.token) {
           this.setupPrivateMessagesSubscription();
         }
-      }, 2000);
+      }, 5000);
     }
 
-    if (!this.privateAttachmentsSubscribed) {
+    if (!this.privateAttachmentsSubscribed && this.pb.authStore.isValid && this.pb.authStore.token) {
       this.privateAttachmentsSubscribed = true;
       try {
         this.pb.collection('private_attachments').subscribe('*', (e) => {
@@ -4307,11 +4394,17 @@ class PocketBaseService {
 
     const listenerObj = { chatServerId, callback };
     this.privateMessageListeners.add(listenerObj);
-    this.setupPrivateMessagesSubscription();
+    if (this.pb.authStore.isValid && this.pb.authStore.token) {
+      this.setupPrivateMessagesSubscription();
+    }
 
     return () => {
       this.privateMessageListeners.delete(listenerObj);
       if (this.privateMessageListeners.size === 0) {
+        if (this.privateMessageRetryTimeout) {
+          clearTimeout(this.privateMessageRetryTimeout);
+          this.privateMessageRetryTimeout = null;
+        }
         this.privateMessagesSubscribed = false;
         try {
           this.pb.collection('private_messages').unsubscribe('*').catch(() => {});
@@ -4381,7 +4474,7 @@ class PocketBaseService {
         return list.slice(0, 50);
       }
     } catch (err) {
-      console.warn('Failed to fetch user notifications:', err);
+      // Return empty notifications fallback silently
     }
     return [];
   }
@@ -4494,7 +4587,7 @@ class PocketBaseService {
         return item;
       }
     } catch (e) {
-      console.warn('app_settings_admin collection query fallback:', e);
+      // Fallback silently if admin settings collection not available
     }
     return null;
   }
@@ -5384,7 +5477,7 @@ class PocketBaseService {
   private usersSubscribed = false;
 
   private setupUsersSubscription() {
-    if (this.usersSubscribed || this.isDemo) return;
+    if (this.usersSubscribed || this.isDemo || !this.pb.authStore.isValid || !this.pb.authStore.token) return;
     this.usersSubscribed = true;
 
     try {
@@ -5404,11 +5497,23 @@ class PocketBaseService {
         });
       }).catch((err) => {
         this.usersSubscribed = false;
-        console.warn('[REALTIME] Users subscribe error:', err);
+        if (!this.pb.authStore.isValid || !this.pb.authStore.token) return;
+        if (this.usersRetryTimeout) clearTimeout(this.usersRetryTimeout);
+        this.usersRetryTimeout = setTimeout(() => {
+          if (this.userListeners.size > 0 && !this.usersSubscribed && this.pb.authStore.isValid && this.pb.authStore.token) {
+            this.setupUsersSubscription();
+          }
+        }, 5000);
       });
     } catch (err) {
       this.usersSubscribed = false;
-      console.warn('subscribeToUsers failed:', err);
+      if (!this.pb.authStore.isValid || !this.pb.authStore.token) return;
+      if (this.usersRetryTimeout) clearTimeout(this.usersRetryTimeout);
+      this.usersRetryTimeout = setTimeout(() => {
+        if (this.userListeners.size > 0 && !this.usersSubscribed && this.pb.authStore.isValid && this.pb.authStore.token) {
+          this.setupUsersSubscription();
+        }
+      }, 5000);
     }
   }
 
@@ -5416,10 +5521,22 @@ class PocketBaseService {
     if (this.isDemo) return () => {};
 
     this.userListeners.add(callback);
-    this.setupUsersSubscription();
+    if (this.pb.authStore.isValid && this.pb.authStore.token) {
+      this.setupUsersSubscription();
+    }
 
     return () => {
       this.userListeners.delete(callback);
+      if (this.userListeners.size === 0) {
+        if (this.usersRetryTimeout) {
+          clearTimeout(this.usersRetryTimeout);
+          this.usersRetryTimeout = null;
+        }
+        this.usersSubscribed = false;
+        try {
+          this.pb.collection('users').unsubscribe('*').catch(() => {});
+        } catch (e) {}
+      }
     };
   }
 

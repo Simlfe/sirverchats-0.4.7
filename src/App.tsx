@@ -33,7 +33,7 @@ import { GlobalMusicPlayer } from './components/MusicPlayer';
 // Code-Split Lazy Loaded Components
 const SettingsModal = React.lazy(() => import('./components/SettingsModal'));
 const ChatPanel = React.lazy(() => import('./components/ChatPanel'));
-const VoicePanel = React.lazy(() => import('./components/VoicePanel'));
+import VoicePanel from './components/VoicePanel';
 const ServerSettingsModal = React.lazy(() => import('./components/ServerSettingsModal'));
 const DiscoveryCenter = React.lazy(() => import('./components/DiscoveryCenter'));
 const CreateServerModal = React.lazy(() => import('./components/CreateServerModal'));
@@ -1657,11 +1657,30 @@ export default function App() {
               return updated;
             }
             const prevMsg = prev[existingIdx];
+            const incomingAtts =
+              fullMsg.expand?.['attachments(message)'] ||
+              fullMsg.expand?.['private_attachments(message)'] ||
+              fullMsg.expand?.attachments_via_message;
+            const prevAtts =
+              prevMsg.expand?.['attachments(message)'] ||
+              prevMsg.expand?.['private_attachments(message)'] ||
+              prevMsg.expand?.attachments_via_message;
+            const effectiveAtts = (incomingAtts && incomingAtts.length > 0) ? incomingAtts : prevAtts;
+
             const nextMsg: Message = {
               ...prevMsg,
               ...fullMsg,
               reactions: fullMsg.reactions !== undefined ? fullMsg.reactions : prevMsg.reactions,
-              expand: fullMsg.expand || prevMsg.expand
+              expand: {
+                ...(prevMsg.expand || {}),
+                ...(fullMsg.expand || {}),
+                ...(effectiveAtts && effectiveAtts.length > 0 ? {
+                  'attachments(message)': effectiveAtts,
+                  'private_attachments(message)': effectiveAtts,
+                  attachments_via_message: effectiveAtts,
+                  private_attachments_via_message: effectiveAtts,
+                } : {})
+              }
             };
             if (isSingleMessageEqual(prevMsg, nextMsg)) {
               return prev;
@@ -1695,12 +1714,31 @@ export default function App() {
 
             const prevMsg = prev[existingIdx];
             const matchedTempId = (prevMsg as any).temp_id || (prevMsg.id.startsWith('optimistic-') ? prevMsg.id : undefined);
+            const incomingAtts =
+              fullMsg.expand?.['attachments(message)'] ||
+              fullMsg.expand?.['private_attachments(message)'] ||
+              fullMsg.expand?.attachments_via_message;
+            const prevAtts =
+              prevMsg.expand?.['attachments(message)'] ||
+              prevMsg.expand?.['private_attachments(message)'] ||
+              prevMsg.expand?.attachments_via_message;
+            const effectiveAtts = (incomingAtts && incomingAtts.length > 0) ? incomingAtts : prevAtts;
+
             const nextMsg: Message = {
               ...prevMsg,
               ...fullMsg,
               reactions: fullMsg.reactions !== undefined ? fullMsg.reactions : prevMsg.reactions,
               temp_id: matchedTempId || (fullMsg as any).temp_id,
-              expand: fullMsg.expand || prevMsg.expand
+              expand: {
+                ...(prevMsg.expand || {}),
+                ...(fullMsg.expand || {}),
+                ...(effectiveAtts && effectiveAtts.length > 0 ? {
+                  'attachments(message)': effectiveAtts,
+                  'private_attachments(message)': effectiveAtts,
+                  attachments_via_message: effectiveAtts,
+                  private_attachments_via_message: effectiveAtts,
+                } : {})
+              }
             };
 
             // If the message is visually unchanged (e.g. identical reactions after optimistic update), return prev to avoid re-render flicker
@@ -1811,12 +1849,33 @@ export default function App() {
 
             let updated: Message[];
             if (existingIdx !== -1) {
-              const matchedTempId = (prev[existingIdx] as any).temp_id || (prev[existingIdx].id.startsWith('optimistic-') ? prev[existingIdx].id : undefined);
+              const prevMsg = prev[existingIdx];
+              const matchedTempId = (prevMsg as any).temp_id || (prevMsg.id.startsWith('optimistic-') ? prevMsg.id : undefined);
+              const incomingAtts =
+                fullMsg.expand?.['attachments(message)'] ||
+                fullMsg.expand?.['private_attachments(message)'] ||
+                fullMsg.expand?.attachments_via_message;
+              const prevAtts =
+                prevMsg.expand?.['attachments(message)'] ||
+                prevMsg.expand?.['private_attachments(message)'] ||
+                prevMsg.expand?.attachments_via_message;
+              const effectiveAtts = (incomingAtts && incomingAtts.length > 0) ? incomingAtts : prevAtts;
+
               updated = [...prev];
               updated[existingIdx] = {
+                ...prevMsg,
                 ...msgWithChannel,
                 temp_id: matchedTempId || (fullMsg as any).temp_id,
-                expand: fullMsg.expand || prev[existingIdx].expand
+                expand: {
+                  ...(prevMsg.expand || {}),
+                  ...(fullMsg.expand || {}),
+                  ...(effectiveAtts && effectiveAtts.length > 0 ? {
+                    'attachments(message)': effectiveAtts,
+                    'private_attachments(message)': effectiveAtts,
+                    attachments_via_message: effectiveAtts,
+                    private_attachments_via_message: effectiveAtts,
+                  } : {})
+                }
               };
             } else {
               updated = mergeMessagePage(prev, [msgWithChannel], MAX_ACTIVE_MESSAGES);
@@ -2608,9 +2667,7 @@ export default function App() {
           try {
             const targetMsg = await pbService.getMessageById(targetMessageId);
             if (targetMsg && targetMsg.channel === channelId) itemsToSet.push(targetMsg);
-          } catch (e) {
-            console.warn('Could not fetch target message directly:', e);
-          }
+          } catch (e) {}
         }
 
         const currentEntry = messagesCache.current[channelId];
@@ -2683,9 +2740,7 @@ export default function App() {
                 try {
                   const targetMsg = await pbService.getMessageById(targetMessageId);
                   if (targetMsg && targetMsg.channel === channelId) itemsToSet.push(targetMsg);
-                } catch (e) {
-                  console.warn('Could not fetch target message directly:', e);
-                }
+                } catch (e) {}
               }
 
               const currentEntry = messagesCache.current[channelId];
@@ -2926,23 +2981,56 @@ export default function App() {
 
         // Immediately update optimistic echo with real message id in local state preserving stable temp_id & attachments
         setMessages((prev) => {
+          const optMsg = prev.find((m) => m.id === tempId || (m as any).temp_id === tempId);
+          const currentAtts =
+            optMsg?.expand?.['attachments(message)'] ||
+            optMsg?.expand?.['private_attachments(message)'] ||
+            optimisticAttachmentsList;
+
           const alreadyHasReal = prev.some((m) => m.id === realMsgId);
           if (alreadyHasReal) {
-            return prev.filter((m) => m.id !== tempId && (m as any).temp_id !== tempId);
+            return prev
+              .filter((m) => m.id !== tempId && (m as any).temp_id !== tempId)
+              .map((m) => {
+                if (m.id === realMsgId) {
+                  const existingAtts = m.expand?.['attachments(message)'] || m.expand?.['private_attachments(message)'];
+                  const effectiveAtts = (existingAtts && existingAtts.length > 0) ? existingAtts : currentAtts;
+                  return {
+                    ...m,
+                    ...msg,
+                    id: realMsgId,
+                    temp_id: tempId,
+                    expand: {
+                      ...(m.expand || {}),
+                      ...(msg.expand || {}),
+                      ...(effectiveAtts && effectiveAtts.length > 0 ? {
+                        'attachments(message)': effectiveAtts,
+                        'private_attachments(message)': effectiveAtts,
+                        attachments_via_message: effectiveAtts,
+                        private_attachments_via_message: effectiveAtts,
+                      } : {})
+                    }
+                  };
+                }
+                return m;
+              });
           }
           return prev.map((m) => {
             if (m.id === tempId || (m as any).temp_id === tempId) {
-              const currentAtts = m.expand?.['attachments(message)'] || m.expand?.['private_attachments(message)'] || optimisticAttachmentsList;
               return {
                 ...m,
                 ...msg,
                 id: realMsgId,
                 temp_id: tempId,
                 expand: {
-                  ...msg.expand,
-                  ...m.expand,
-                  'attachments(message)': currentAtts,
-                  'private_attachments(message)': currentAtts
+                  ...(m.expand || {}),
+                  ...(msg.expand || {}),
+                  ...(currentAtts && currentAtts.length > 0 ? {
+                    'attachments(message)': currentAtts,
+                    'private_attachments(message)': currentAtts,
+                    attachments_via_message: currentAtts,
+                    private_attachments_via_message: currentAtts,
+                  } : {})
                 }
               };
             }
@@ -3885,6 +3973,10 @@ export default function App() {
   // Auto-restore text channel when activeRoom disconnects while viewing a voice channel
   useEffect(() => {
     if (!activeRoom && activeChannel && activeChannel.type === 'voice') {
+      // Do not navigate away if the user explicitly has this voice channel selected or is connecting to it
+      if (activeVoiceChannel?.id === activeChannel.id) {
+        return;
+      }
       let targetTextChan = previousTextChannelRef.current;
       if (!targetTextChan || targetTextChan.type === 'voice') {
         if (activeServer) {
@@ -3900,7 +3992,7 @@ export default function App() {
         previousTextChannelRef.current = targetTextChan;
       }
     }
-  }, [activeRoom, activeChannel, activeServer, channels]);
+  }, [activeRoom, activeChannel, activeVoiceChannel, activeServer, channels]);
 
   const handleLogout = () => {
     realtimeMediaProvider.disconnect().catch(() => {});
