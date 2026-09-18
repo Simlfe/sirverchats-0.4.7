@@ -150,7 +150,7 @@ function releaseMetadataPlugin(): Plugin {
         fileName: 'release.json',
         source: JSON.stringify({
           product: 'SirverData',
-          version: process.env.npm_package_version || '1.0.0',
+          version: process.env.npm_package_version || '1.0.1',
           sourceCommit,
           apiV2Bootstrap: process.env.VITE_ENABLE_API_V2_BOOTSTRAP === 'true',
           builtAt: new Date().toISOString(),
