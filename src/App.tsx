@@ -2357,6 +2357,52 @@ export default function App() {
     }
   };
 
+  /**
+   * Older message pages render without attachment expansion so the cursor
+   * request stays small. Hydrate any attachments in one background batch and
+   * merge only those records into the current channel; never replace the
+   * message window that may have changed while the request was in flight.
+   */
+  const hydrateOlderMessageAttachments = (conversationId: string, pageItems: Message[], isPrivate: boolean) => {
+    if (!pageItems.some((message) => message?.has_attachment)) return;
+
+    void pbService.hydrateMessageAttachments(pageItems, isPrivate).then((hydratedItems) => {
+      const hydratedById = new Map(
+        hydratedItems
+          .filter((message) => message?.id && message.expand && (
+            message.expand['attachments(message)']?.length ||
+            message.expand['private_attachments(message)']?.length
+          ))
+          .map((message) => [message.id, message]),
+      );
+      if (hydratedById.size === 0) return;
+
+      const entry = messagesCache.current[conversationId];
+      if (entry) {
+        const updatedItems = entry.items.map((message) => {
+          const hydrated = hydratedById.get(message.id);
+          return hydrated ? { ...message, ...hydrated, expand: { ...(message.expand || {}), ...(hydrated.expand || {}) } } : message;
+        });
+        messagesCache.current[conversationId] = {
+          ...entry,
+          items: dedupeMessages(updatedItems, MAX_ACTIVE_MESSAGES),
+          oldestCursor: getOldestCursor(updatedItems),
+          newestCursor: getNewestCursor(updatedItems),
+        };
+      }
+
+      if (activeChannelRef.current?.id === conversationId) {
+        setMessages((previous) => previous.map((message) => {
+          const hydrated = hydratedById.get(message.id);
+          return hydrated ? { ...message, ...hydrated, expand: { ...(message.expand || {}), ...(hydrated.expand || {}) } } : message;
+        }));
+      }
+    }).catch(() => {
+      // Attachment hydration is best effort; the already-rendered message page
+      // remains usable and can be hydrated again by a later refresh.
+    });
+  };
+
   const loadMessages = async (channelId: string, pageNum = 1, append = false, targetMessageId: string | null = null, limit = 10, retryCount = 0) => {
     const nextGeneration = (loadMessagesGenerationRef.current.get(channelId) || 0) + 1;
     loadMessagesGenerationRef.current.set(channelId, nextGeneration);
@@ -2548,6 +2594,7 @@ export default function App() {
           chatServerId,
           cursor,
           requestLimit,
+          { deferAttachments: append },
         );
         if (!requestIsCurrent()) return;
 
@@ -2575,6 +2622,7 @@ export default function App() {
           setHasMoreMessages(remoteHasMore);
           setMessagesPage(pageNum);
         }
+        if (append) hydrateOlderMessageAttachments(channelId, page.items, true);
         offlineCacheService.enqueueMessagePersistence('dm', channelId, page, cursor, pageNum);
         if (remoteHasMore) {
           setTimeout(() => prefetchNextOlderPage(channelId, true), 100);
@@ -2595,7 +2643,7 @@ export default function App() {
                 chatServerId,
                 cursor,
                 requestLimit,
-                { timeoutMs: 20000 },
+                { timeoutMs: 20000, deferAttachments: append },
               );
               if (!requestIsCurrent()) return;
               const existing = cachedEntry?.items || (activeChannelRef.current?.id === channelId ? messages : []);
@@ -2620,6 +2668,7 @@ export default function App() {
                 setHasMoreMessages(remoteHasMore);
                 setMessagesPage(pageNum);
               }
+              if (append) hydrateOlderMessageAttachments(channelId, retryPage.items, true);
               offlineCacheService.enqueueMessagePersistence('dm', channelId, retryPage, cursor, pageNum);
               return;
             } catch (retryErr) {
@@ -2656,7 +2705,7 @@ export default function App() {
           ? messages
           : (currentEntry?.items || []);
         const oldestCursor = getOldestCursor(currentDataset) || currentEntry?.oldestCursor;
-        const page = await pbService.fetchMessagesPage(channelId, oldestCursor, requestLimit);
+        const page = await pbService.fetchMessagesPage(channelId, oldestCursor, requestLimit, { deferAttachments: true });
         if (!requestIsCurrent()) return;
 
         const mergedItems = mergeOlderMessagePage(currentDataset, page.items, MAX_ACTIVE_MESSAGES);
@@ -2674,6 +2723,7 @@ export default function App() {
           setMessages((prev) => mergeOlderMessagePage(prev, page.items, MAX_ACTIVE_MESSAGES));
           setHasMoreMessages(remoteHasMore);
         }
+        hydrateOlderMessageAttachments(channelId, page.items, false);
         offlineCacheService.enqueueMessagePersistence('channel', channelId, page, oldestCursor, pageNum);
         if (remoteHasMore) {
           setTimeout(() => prefetchNextOlderPage(channelId, false), 100);
@@ -2738,7 +2788,7 @@ export default function App() {
               const currentEntry = messagesCache.current[channelId];
               const currentDataset = currentEntry?.items || messages;
               const oldestCursor = currentEntry?.oldestCursor || getOldestCursor(currentDataset);
-              const retryPage = await pbService.fetchMessagesPage(channelId, oldestCursor, requestLimit, { timeoutMs: 20000 });
+              const retryPage = await pbService.fetchMessagesPage(channelId, oldestCursor, requestLimit, { timeoutMs: 20000, deferAttachments: true });
               if (!requestIsCurrent()) return;
 
               const mergedItems = mergeOlderMessagePage(currentDataset, retryPage.items, MAX_ACTIVE_MESSAGES);
@@ -2757,6 +2807,7 @@ export default function App() {
                 setHasMoreMessages(remoteHasMore);
                 setMessagesPage(pageNum);
               }
+              hydrateOlderMessageAttachments(channelId, retryPage.items, false);
               offlineCacheService.enqueueMessagePersistence('channel', channelId, retryPage, oldestCursor, pageNum);
               return;
             } else {
@@ -2863,6 +2914,7 @@ export default function App() {
               cachedServer?.id,
               oldestCursor,
               OLDER_MESSAGE_PAGE_SIZE,
+              { deferAttachments: true },
             );
             fetchedPage = res;
             items = res.items;
@@ -2873,6 +2925,7 @@ export default function App() {
             conversationId,
             oldestCursor,
             OLDER_MESSAGE_PAGE_SIZE,
+            { deferAttachments: true },
           );
           fetchedPage = res;
           items = res.items;
@@ -2924,6 +2977,7 @@ export default function App() {
         if (didMessageWindowMoveOlder(messages, revealedItems)) {
           setMessages(revealedItems);
           setHasMoreMessages(prefetched.hasMore);
+          hydrateOlderMessageAttachments(conversationId, prefetched.items, isDm);
           const nextEntry = {
             ...(entry || {}),
             items: revealedItems,
@@ -2957,6 +3011,7 @@ export default function App() {
           const cachedHasMore = syncCachedPage.hasMore;
           setMessages(revealedItems);
           setHasMoreMessages(cachedHasMore);
+          hydrateOlderMessageAttachments(conversationId, syncCachedPage.items, isDm);
           const revealedEntry = entry || {
             items: [],
             page: messagesPage,
@@ -2998,6 +3053,7 @@ export default function App() {
           const cachedHasMore = cachedPage.hasMore;
           setMessages(revealedItems);
           setHasMoreMessages(cachedHasMore);
+          hydrateOlderMessageAttachments(conversationId, cachedPage.items, isDm);
           const revealedEntry = entry || {
             items: [],
             page: messagesPage,

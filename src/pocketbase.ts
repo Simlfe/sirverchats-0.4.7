@@ -2011,7 +2011,7 @@ class PocketBaseService {
     channelId: string,
     cursor: MessageCursor | null = null,
     limit: number = INITIAL_MESSAGE_PAGE_SIZE,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; deferAttachments?: boolean },
   ): Promise<MessagePage<Message>> {
     if (!channelId) return { items: [], nextCursor: null, hasMore: false };
     if (this.isDemo) {
@@ -2024,6 +2024,10 @@ class PocketBaseService {
     const filter = buildOlderMessageFilter(`channel = "${channelId.replace(/"/g, '\\"')}"`, cursor);
     let records: any;
     try {
+      // Attachment relations can be large and are not needed to reveal the
+      // next text page. Older pages request only the lightweight relations;
+      // callers hydrate attachments in one background batch after rendering.
+      const preferredExpand = options?.deferAttachments ? 'sender,reply_to' : cachedChannelMessageExpand;
       const query = (expand: string) => this.pb.collection('messages').getList(1, safeLimit + 1, {
         filter,
         sort: '-created,-id',
@@ -2033,13 +2037,15 @@ class PocketBaseService {
       });
       try {
         records = await this.withReadDeadline(
-          () => query(cachedChannelMessageExpand),
+          () => query(preferredExpand),
           undefined,
           options?.timeoutMs,
         );
       } catch (schemaError) {
         if (!isSchemaCompatibilityError(schemaError)) throw schemaError;
-        const fallbackExpand = cachedChannelMessageExpand.includes('attachments(')
+        const fallbackExpand = options?.deferAttachments
+          ? 'sender,reply_to'
+          : cachedChannelMessageExpand.includes('attachments(')
           ? 'sender,reply_to,attachments_via_message'
           : 'sender,reply_to,attachments(message)';
         records = await this.withReadDeadline(
@@ -2074,7 +2080,7 @@ class PocketBaseService {
     chatServerId?: string,
     cursor: MessageCursor | null = null,
     limit: number = INITIAL_MESSAGE_PAGE_SIZE,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; deferAttachments?: boolean },
   ): Promise<MessagePage<Message>> {
     if (this.isDemo) return { items: [], nextCursor: null, hasMore: false };
     let targetServerId = chatServerId;
@@ -2091,6 +2097,9 @@ class PocketBaseService {
     const filter = buildOlderMessageFilter(`chat_server = "${targetServerId.replace(/"/g, '\\"')}"`, cursor);
     let records: any;
     try {
+      // Keep older-history reads small. Attachment metadata is hydrated after
+      // the page is visible instead of blocking the cursor request.
+      const preferredExpand = options?.deferAttachments ? 'sender,reply_to' : cachedPrivateMessageExpand;
       const query = (expand: string) => this.pb.collection('private_messages').getList(1, safeLimit + 1, {
         filter,
         sort: '-created,-id',
@@ -2100,13 +2109,15 @@ class PocketBaseService {
       });
       try {
         records = await this.withReadDeadline(
-          () => query(cachedPrivateMessageExpand),
+          () => query(preferredExpand),
           undefined,
           options?.timeoutMs,
         );
       } catch (schemaError) {
         if (!isSchemaCompatibilityError(schemaError)) throw schemaError;
-        const fallbackExpand = cachedPrivateMessageExpand.includes('attachments(')
+        const fallbackExpand = options?.deferAttachments
+          ? 'sender,reply_to'
+          : cachedPrivateMessageExpand.includes('attachments(')
           ? 'sender,reply_to,private_attachments_via_message'
           : 'sender,reply_to,private_attachments(message)';
         records = await this.withReadDeadline(
@@ -2155,6 +2166,78 @@ class PocketBaseService {
       nextCursor: pageItems.length > 0 ? cursorFromMessage(pageItems[0]) : null,
       hasMore: records.items.length > safeLimit,
     };
+  }
+
+  /**
+   * Hydrate attachment metadata after a message page has already rendered.
+   * This keeps older-history navigation bounded to one lightweight message
+   * query plus one batched attachment query instead of expanding attachments
+   * inside every message row returned by PocketBase.
+   */
+  async hydrateMessageAttachments(messages: Message[], isPrivate = false): Promise<Message[]> {
+    if (this.isDemo || !Array.isArray(messages) || messages.length === 0) return messages;
+
+    const messageIds = Array.from(new Set(
+      messages
+        .filter((message) => message?.id && message.has_attachment)
+        .map((message) => message.id),
+    ));
+    if (messageIds.length === 0) return messages;
+
+    const collectionName = isPrivate ? 'private_attachments' : 'attachments';
+    const filter = messageIds
+      .map((id) => `message = "${String(id).replace(/"/g, '\\"')}"`)
+      .join(' || ');
+    const requestKey = `message-attachments:${isPrivate ? 'private' : 'public'}:${messageIds[0]}:${messageIds.length}`;
+
+    let records: any[];
+    try {
+      records = await this.withReadDeadline(
+        () => this.pb.collection(collectionName).getFullList({
+          filter,
+          sort: 'created,id',
+          requestKey,
+        }),
+        requestKey,
+        10000,
+      );
+    } catch (error) {
+      // Attachment hydration is deliberately non-blocking. The message page
+      // is already usable, so a missing/slow attachment query must not make
+      // older messages appear stuck or erase the cached page.
+      if ((import.meta as any).env?.DEV) {
+        console.warn('[MESSAGES] deferred attachment hydration failed:', error);
+      }
+      return messages;
+    }
+
+    const byMessage = new Map<string, any[]>();
+    records.forEach((record) => {
+      const messageId = record?.message;
+      if (!messageId) return;
+      const list = byMessage.get(messageId) || [];
+      list.push(record);
+      byMessage.set(messageId, list);
+    });
+
+    return messages.map((message) => {
+      const attachments = byMessage.get(message.id) || [];
+      if (attachments.length === 0) return message;
+      const normalized = isPrivate
+        ? normalizeAttachmentRecords([], attachments)
+        : normalizeAttachmentRecords(attachments, []);
+      if (normalized.length === 0) return message;
+      return {
+        ...message,
+        expand: {
+          ...(message.expand || {}),
+          'attachments(message)': normalized,
+          'private_attachments(message)': normalized,
+          attachments_via_message: normalized,
+          private_attachments_via_message: normalized,
+        },
+      } as Message;
+    });
   }
 
   async fetchMessages(channelId: string, page: number = 1, perPage: number = 35, beforeCreated?: string, beforeId?: string): Promise<{ items: Message[]; totalPages: number; totalItems: number }> {
