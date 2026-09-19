@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { chooseFeedPreview, isOriginalFeedUrl } from '../src/services/thumbnailPolicy';
 import { calculateThumbnailDimensions } from '../src/services/thumbnailDimensions';
 import { getAttachmentThumbnailUrl } from '../src/services/attachmentPreview';
+import { inferMimeType, isAttachmentImage } from '../src/services/attachmentProcessor';
+import { getAttachmentUrl } from '../src/pocketbase';
 
 test('feed policy rejects a remote original URL', () => {
   const original = 'https://api.sirverdata.top/api/files/attachments/a/photo.jpg';
@@ -63,4 +65,23 @@ test('getAttachmentThumbnailUrl normalizes messages collection and gates non-med
     collectionName: 'attachments',
   });
   assert.ok(explicitThumb.includes('/api/files/attachments/att456/thumb_small.webp'));
+});
+
+test('legacy extension labels still classify images as images', () => {
+  assert.equal(inferMimeType('screenshot-without-extension', 'WEBP'), 'image/webp');
+  assert.equal(isAttachmentImage('screenshot-without-extension', 'webp'), true);
+  assert.equal(isAttachmentImage('screenshot.webp', 'application/octet-stream'), true);
+});
+
+test('attachment URLs preserve private collections and PocketBase collection ids', () => {
+  assert.ok(getAttachmentUrl({
+    id: 'private-att-1',
+    file: 'screenshot.webp',
+    isPrivate: true,
+  }).includes('/api/files/private_attachments/private-att-1/screenshot.webp'));
+  assert.ok(getAttachmentUrl({
+    id: 'att-2',
+    file: 'screenshot.webp',
+    collectionId: 'collection-id-2',
+  }).includes('/api/files/collection-id-2/att-2/screenshot.webp'));
 });

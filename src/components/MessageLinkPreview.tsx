@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { CornerDownRight, MessageSquare, Lock, Hash, ArrowUpRight, User as UserIcon, Loader2, FileText, Image as ImageIcon, Trash2 } from 'lucide-react';
 import { Channel, Message, Server, User } from '../types';
-import { pbService } from '../pocketbase';
+import { getAttachmentUrl, pbService } from '../pocketbase';
+import { isAttachmentImage } from '../services/attachmentProcessor';
+import { getAttachmentThumbnailUrl } from '../services/attachmentPreview';
 import { MessageDeletionService } from '../services/messageDeletionService';
 
 function getSenderAvatar(user?: User) {
@@ -183,10 +185,7 @@ export const MessageLinkPreviewCard: React.FC<MessageLinkPreviewProps> = React.m
     targetMessage?.attachments ||
     [];
   const imageAttachment = Array.isArray(rawAtts)
-    ? rawAtts.find((a: any) => {
-        const file = a?.file || '';
-        return /\.(jpe?g|png|gif|webp|svg|bmp)$/i.test(file);
-      })
+    ? rawAtts.find((a: any) => isAttachmentImage(a?.file, a?.type || a?.mime || a?.thumbnail_mime))
     : null;
 
   return (
@@ -257,7 +256,7 @@ export const MessageLinkPreviewCard: React.FC<MessageLinkPreviewProps> = React.m
             <div className="pl-8 mt-1">
               <div className="max-w-[200px] max-h-[140px] rounded-xl overflow-hidden border border-[var(--theme-border)] bg-[var(--theme-bg-tertiary)]">
                 <img
-                  src={`${pbService.getServerUrl()}/api/files/attachments/${imageAttachment.id}/${imageAttachment.file}`}
+                  src={getAttachmentThumbnailUrl(imageAttachment) || getAttachmentUrl(imageAttachment)}
                   alt=""
                   className="w-full h-full object-cover"
                   loading="lazy"

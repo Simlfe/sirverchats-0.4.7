@@ -160,12 +160,12 @@ export function getFileUrl(collection: string, recordId: string, filename: strin
 export function normalizeAttachmentRecords(pubAtts: any[] = [], privAtts: any[] = []): Attachment[] {
   const normalizedPub = pubAtts.map((a) => ({
     ...a,
-    collectionName: a.collectionName || a['@collectionName'] || 'attachments',
+    collectionName: getAttachmentCollectionName(a, false),
     type: inferMimeType(a.file, a.type)
   }));
   const normalizedPriv = privAtts.map((a) => ({
     ...a,
-    collectionName: a.collectionName || a['@collectionName'] || 'private_attachments',
+    collectionName: getAttachmentCollectionName(a, true),
     isPrivate: true,
     type: inferMimeType(a.file, a.type)
   }));
@@ -182,19 +182,34 @@ export function normalizeAttachmentRecords(pubAtts: any[] = [], privAtts: any[] 
   return combined;
 }
 
+/** Resolve the PocketBase file collection for attachment records from both
+ * current RecordModels and older cached/expanded shapes. */
+export function getAttachmentCollectionName(recordOrCollection: any, isPrivate = false): string {
+  const raw = typeof recordOrCollection === 'string'
+    ? recordOrCollection
+    : recordOrCollection?.collectionName ||
+      recordOrCollection?.['@collectionName'] ||
+      recordOrCollection?.collectionId ||
+      recordOrCollection?.['@collectionId'] ||
+      '';
+  const collection = String(raw || '').trim();
+  if (collection === 'messages' || collection === 'private_messages') {
+    return collection === 'private_messages' || isPrivate ? 'private_attachments' : 'attachments';
+  }
+  return collection || (isPrivate ? 'private_attachments' : 'attachments');
+}
+
 export function getAttachmentUrl(recordIdOrAttach: any, filename?: string, collectionName?: string): string {
   if (typeof recordIdOrAttach === 'object' && recordIdOrAttach !== null) {
     const recordId = recordIdOrAttach.id;
     const fn = recordIdOrAttach.file || filename || '';
-    if (recordIdOrAttach.url && (recordIdOrAttach.url.startsWith('blob:') || recordIdOrAttach.url.startsWith('data:'))) {
+    if (recordIdOrAttach.url && /^(?:blob:|data:|https?:\/\/)/i.test(recordIdOrAttach.url)) {
       return recordIdOrAttach.url;
     }
-    const coll =
-      recordIdOrAttach.collectionName ||
-      recordIdOrAttach['@collectionName'] ||
-      (recordIdOrAttach.isPrivate ? 'private_attachments' : null) ||
-      collectionName ||
-      'attachments';
+    const coll = getAttachmentCollectionName(
+      recordIdOrAttach.collectionName || recordIdOrAttach['@collectionName'] || recordIdOrAttach.collectionId || collectionName,
+      Boolean(recordIdOrAttach.isPrivate),
+    );
     if (!recordId || !fn) return '';
     if (fn.startsWith('data:') || fn.startsWith('blob:') || fn.startsWith('http://') || fn.startsWith('https://')) {
       return fn;
@@ -208,7 +223,7 @@ export function getAttachmentUrl(recordIdOrAttach: any, filename?: string, colle
   if (fn.startsWith('data:') || fn.startsWith('blob:') || fn.startsWith('http://') || fn.startsWith('https://')) {
     return fn;
   }
-  const coll = collectionName || 'attachments';
+  const coll = getAttachmentCollectionName(collectionName, false);
   return getFileUrl(coll, recordId, fn);
 }
 

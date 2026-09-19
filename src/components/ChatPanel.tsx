@@ -228,6 +228,7 @@ function formatMessageShortTime(createdString?: string): string {
 import { motion, AnimatePresence } from "motion/react";
 import {
   pbService,
+  getAttachmentUrl as getPocketbaseAttachmentUrl,
   getEffectiveProfile,
   getPrimaryServerRole,
   getEffectiveUserStatus,
@@ -464,47 +465,7 @@ export function getAttachmentUrl(
   filename?: string,
   collectionName?: string,
 ) {
-  if (typeof recordIdOrAttach === "object" && recordIdOrAttach !== null) {
-    const recordId = recordIdOrAttach.id;
-    const fn = recordIdOrAttach.file || filename || "";
-    if (
-      recordIdOrAttach.url &&
-      (recordIdOrAttach.url.startsWith("blob:") ||
-        recordIdOrAttach.url.startsWith("data:"))
-    ) {
-      return recordIdOrAttach.url;
-    }
-    const coll =
-      recordIdOrAttach.collectionName ||
-      recordIdOrAttach["@collectionName"] ||
-      (recordIdOrAttach.isPrivate ? "private_attachments" : null) ||
-      collectionName ||
-      "attachments";
-    if (!recordId || !fn) return "";
-    if (
-      fn.startsWith("data:") ||
-      fn.startsWith("blob:") ||
-      fn.startsWith("http://") ||
-      fn.startsWith("https://")
-    ) {
-      return fn;
-    }
-    return `${pbService.getServerUrl()}/api/files/${coll}/${recordId}/${fn}`;
-  }
-
-  const recordId = recordIdOrAttach;
-  const fn = filename || "";
-  if (!recordId || !fn) return "";
-  if (
-    fn.startsWith("data:") ||
-    fn.startsWith("blob:") ||
-    fn.startsWith("http://") ||
-    fn.startsWith("https://")
-  ) {
-    return fn;
-  }
-  const coll = collectionName || "attachments";
-  return `${pbService.getServerUrl()}/api/files/${coll}/${recordId}/${fn}`;
+  return getPocketbaseAttachmentUrl(recordIdOrAttach, filename, collectionName);
 }
 
 // Re-export the shared helper for existing callers and extensions.
