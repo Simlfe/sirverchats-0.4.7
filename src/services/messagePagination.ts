@@ -43,6 +43,19 @@ export function compareMessageOrder(a: Pick<Message, 'created' | 'id'>, b: Pick<
   return String(a.id || '').localeCompare(String(b.id || ''));
 }
 
+function messageSenderId(message: Message | undefined): string {
+  if (!message) return '';
+  const sender = (message as any).sender;
+  if (typeof sender === 'string') return sender;
+  return String(
+    (message as any).sender_id ||
+    message.expand?.sender?.id ||
+    (sender && typeof sender === 'object' ? sender.id : '') ||
+    (message as any).user ||
+    '',
+  );
+}
+
 function relationRichness(value: unknown): number {
   if (!value || typeof value !== 'object') return 0;
   return Object.values(value as Record<string, unknown>)
@@ -132,12 +145,20 @@ export function dedupeMessages(messages: Message[], maxItems?: number): Message[
       byId.delete(tempId);
     }
 
-    const sender = message.sender || message.expand?.sender?.id || '';
+    const sender = messageSenderId(message);
     const content = (message.content || '').trim();
     const signature = sender ? `${sender}|${content}` : '';
     if (signature && !isOpt && message.id && !message.id.startsWith('optimistic-')) {
       const optimisticId = optimisticBySignature.get(signature);
-      if (optimisticId) byId.delete(optimisticId);
+      const optimistic = optimisticId ? byId.get(optimisticId) : undefined;
+      const incomingAt = new Date(message.created || 0).getTime();
+      const optimisticAt = optimistic ? new Date(optimistic.created || 0).getTime() : 0;
+      // Matching by sender/content is only a fallback for records that do not
+      // carry the client temp id. Keep it bounded to the short optimistic
+      // window so two legitimate identical messages are not collapsed.
+      if (optimisticId && optimistic && (!incomingAt || !optimisticAt || Math.abs(incomingAt - optimisticAt) <= 15_000)) {
+        byId.delete(optimisticId);
+      }
     } else if (signature && (message.is_pending || message.id.startsWith('optimistic-'))) {
       optimisticBySignature.set(signature, message.id);
     }

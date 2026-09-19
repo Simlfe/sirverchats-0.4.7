@@ -180,6 +180,25 @@ test('same-room joins share one provider operation instead of restarting negotia
   await provider.leaveRoom();
 });
 
+test('a stale connecting state does not short-circuit a new room join', async () => {
+  const provider = new RealtimeMediaProvider();
+  (provider as any).isMuted = true;
+  (provider as any).connectionState = 'connecting';
+  let joinCount = 0;
+  const adapter = {
+    joinSession: async () => { joinCount += 1; },
+    leaveSession: async () => {},
+    getConnectionState: () => 'connected',
+  };
+  (provider as any).sfuAdapter = adapter;
+  (provider as any).ensureSfuAdapter = async () => adapter;
+
+  await provider.joinRoom(voiceRoomConfig('room-stale-state'));
+  assert.equal(joinCount, 1);
+  assert.equal(provider.getConnectionState(), 'connected');
+  await provider.leaveRoom();
+});
+
 test('A-to-B room switch cancels A without waiting for its negotiation timeout', async () => {
   const provider = new RealtimeMediaProvider();
   (provider as any).isMuted = true;

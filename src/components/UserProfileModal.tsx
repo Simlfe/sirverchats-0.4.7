@@ -1256,9 +1256,7 @@ export default function UserProfileModal({
                 <span>{primaryRole.name}</span>
               </span>
               {currentServer && !viewDefaultProfile && (
-                (serverMemberRecord && (serverMemberRecord.is_member === false || serverMemberRecord.membership_status === 'left' || serverMemberRecord.membership_status === 'banned' || serverMemberRecord.membership_status === 'kicked')) ||
-                localStorage.getItem(`is_member_${currentServer.id}_${user.id}`) === 'false' ||
-                localStorage.getItem(`membership_status_${currentServer.id}_${user.id}`) === 'left'
+                !pbService.isUserInServer(currentServer.id, user)
               ) && (
                 <span className="text-[10px] uppercase font-black px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 border border-slate-700 flex items-center gap-1 shadow-xs">
                   <span>{lang === 'ar' ? 'ليس في السيرفر' : 'Not in server'}</span>

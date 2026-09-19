@@ -17,7 +17,6 @@ import callSignalingService from '../services/callSignaling';
 import { playJoinSound, playLeaveSound, setRingtoneMuted, getIsRingtoneMuted, stopAllRingtones, unlockAudioContext } from '../lib/sounds';
 import { getServerMemberAvatarUrl, getServerMemberDisplayName, pbService, parseChannelOptions, mergeUserRecord } from '../pocketbase';
 import {
-  acquireMicrophoneForJoin,
   checkAndRequestCameraPermission,
   checkAndRequestScreenSharePermission,
 } from '../utils/permissions';
@@ -95,19 +94,11 @@ async function prepareRoomJoin(config: RoomConfig): Promise<RoomConfig> {
     sessionId: config.sessionId || createVoiceSessionId(),
     joinStartedAtMs,
   };
-  const microphoneTask = acquireMicrophoneForJoin()
-    .then((result) => {
-      console.info('[VOICE_JOIN_TIMING]', {
-        phase: result.granted ? 'microphone_ready' : 'microphone_failed',
-        durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - joinStartedAtMs),
-      });
-      return result;
-    })
-    .catch((err) => {
-      console.warn('[VOICE_JOIN_TIMING] Microphone acquisition failed:', err);
-      return { granted: false, track: null, error: String(err?.message || err) };
-    });
-
+  // Do not hold the LiveKit join behind getUserMedia. Browser permission
+  // prompts can remain pending (or be blocked by a WebView gesture policy),
+  // which used to leave the voice panel blinking in a connecting state even
+  // though signaling was ready. The provider publishes the microphone after
+  // the room is connected and falls back to muted if capture is unavailable.
   const preflightTask = realtimeMediaProvider.preflightRoom(preparedConfig).then(() => {
     console.info('[VOICE_JOIN_TIMING]', {
       phase: 'code_and_token_ready',
@@ -116,15 +107,8 @@ async function prepareRoomJoin(config: RoomConfig): Promise<RoomConfig> {
   }).catch((err) => {
     console.warn('[VOICE_JOIN_TIMING] Preflight room notice:', err);
   });
-
-  const [microphoneResult] = await Promise.allSettled([
-    microphoneTask,
-    preflightTask,
-  ]);
-
-  const microphone = microphoneResult.status === 'fulfilled' ? microphoneResult.value : null;
-
-  return { ...preparedConfig, initialMicrophoneTrack: microphone?.track || undefined };
+  await preflightTask;
+  return preparedConfig;
 }
 
 export const MediaProvider: React.FC<{

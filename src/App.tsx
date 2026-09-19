@@ -498,6 +498,25 @@ export default function App() {
   useEffect(() => { langRef.current = lang; }, [lang]);
   useEffect(() => { activeServerRef.current = activeServer; }, [activeServer]);
 
+  // Keep the visible server list aligned with the users.in_servers relation
+  // when PocketBase pushes a user-record update (join, leave, kick, or ban).
+  // This prevents a stale server_members cache from keeping a removed server
+  // mounted after the authoritative user record has changed.
+  useEffect(() => {
+    const relationIds = currentUser?.in_servers;
+    if (!Array.isArray(relationIds)) return;
+    const ids = new Set(relationIds.map((value: any) => typeof value === 'string' ? value : value?.id).filter(Boolean));
+    setServers((previous) => previous.filter((server) => ids.has(server.id)));
+    const active = activeServerRef.current;
+    if (active && !ids.has(active.id)) {
+      setActiveServer(null);
+      setChannels([]);
+      setActiveChannel(null);
+      setActiveVoiceChannel(null);
+      setShowDiscoveryCenter(true);
+    }
+  }, [currentUser?.id, currentUser?.in_servers]);
+
   // Keep the optional v2 read client bound to the same PocketBase session as
   // the legacy mutation/realtime layer.  The provider is cheap to install and
   // does not make a network request until the gateway flag is enabled.
@@ -1706,7 +1725,9 @@ export default function App() {
 
         if (currentActiveChan && fullMsg.channel === currentActiveChan.id) {
           setMessages((prev) => {
-            const incomingSenderId = fullMsg.sender || (fullMsg as any).user;
+            const incomingSenderId = typeof fullMsg.sender === 'string'
+              ? fullMsg.sender
+              : (fullMsg as any).sender_id || (fullMsg as any).user || fullMsg.expand?.sender?.id;
             const incomingContent = (fullMsg.content || '').trim();
             const existingIdx = prev.findIndex(
               (m) =>
@@ -2193,7 +2214,11 @@ export default function App() {
     // when the v2 gateway is enabled in the deployment environment.
     const bootstrap = await ensureGatewayBootstrap();
     if (bootstrap) {
-      const list = Array.isArray(bootstrap.servers) ? bootstrap.servers : [];
+      const bootstrapServers = Array.isArray(bootstrap.servers) ? bootstrap.servers : [];
+      const relation = currentUser?.in_servers;
+      const list = Array.isArray(relation)
+        ? bootstrapServers.filter((server) => pbService.isUserInServer(server.id, currentUser))
+        : bootstrapServers;
       setServers((prev) => {
         if (prev.length === list.length && prev.every((s, i) => s.id === list[i]?.id && s.name === list[i]?.name && s.icon === list[i]?.icon)) return prev;
         return list;
@@ -3412,7 +3437,12 @@ export default function App() {
         }
 
         setMessages((prev) => {
-          const updated = prev.map((m) => (m.id === tempId || m.id === realMsgId ? finalMsg : m));
+          // The PocketBase realtime echo and the send response can arrive in
+          // either order. Replace both optimistic/real copies, then run the
+          // canonical merge so React never renders two rows for one record.
+          const updated = dedupeMessages(
+            prev.map((m) => (m.id === tempId || (m as any).temp_id === tempId || m.id === realMsgId ? finalMsg : m)),
+          );
           if (messagesCache.current[activeChannel.id]) {
             messagesCache.current[activeChannel.id].items = updated;
           }
@@ -3479,10 +3509,8 @@ export default function App() {
                   targetUserIds.add(user.id);
                   return;
                 }
-                const localIsMem = localStorage.getItem(`is_member_${activeServer.id}_${user.id}`);
-                const localStat = localStorage.getItem(`membership_status_${activeServer.id}_${user.id}`);
                 const memRecord = pbService.getCachedServerMember(activeServer.id, user.id);
-                const inactive = localIsMem === 'false' || ['left', 'banned', 'kicked'].includes(localStat || '') ||
+                const inactive = !pbService.isUserInServer(activeServer.id, user) ||
                   memRecord?.is_member === false || ['left', 'banned', 'kicked'].includes(memRecord?.membership_status || '');
                 if (!inactive) targetUserIds.add(user.id);
               });

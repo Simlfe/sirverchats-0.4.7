@@ -2071,6 +2071,11 @@ function ChatPanel({
     const addMemberUser = (u: User, mRecord?: ServerMember) => {
       if (processedUserIds.has(u.id)) return;
 
+      // Membership is defined by users.in_servers. A server_members row,
+      // cached role, or an old localStorage flag must not make an unrelated
+      // directory user appear in this server's member list.
+      if (!pbService.isUserInServer(sObj.id, u)) return;
+
       const memRecord =
         mRecord ||
         membersMap.get(u.id) ||
@@ -2083,19 +2088,6 @@ function ChatPanel({
           memRecord.membership_status === "left" ||
           memRecord.membership_status === "banned" ||
           memRecord.membership_status === "kicked"
-        ) {
-          return;
-        }
-      } else {
-        const localIsMem = localStorage.getItem(`is_member_${sObj.id}_${u.id}`);
-        const localStat = localStorage.getItem(
-          `membership_status_${sObj.id}_${u.id}`,
-        );
-        if (
-          localIsMem === "false" ||
-          localStat === "left" ||
-          localStat === "banned" ||
-          localStat === "kicked"
         ) {
           return;
         }
@@ -2154,7 +2146,7 @@ function ChatPanel({
       addMemberUser(currentUser);
     }
 
-    // Include all registered workspace users in the server member list if they haven't explicitly left or been banned
+    // Include only users whose users.in_servers relation contains this server.
     allUsersList.forEach((u) => {
       if (!processedUserIds.has(u.id)) {
         addMemberUser(u);
@@ -3769,32 +3761,10 @@ function ChatPanel({
         }
 
         if (foundUser) {
-          const memRecord =
-            serverMembersMap.get(foundUser.id) ||
-            (server?.id
-              ? pbService.getCachedServerMember(server.id, foundUser.id)
-              : null);
-          const localIsMem = server?.id
-            ? localStorage.getItem(`is_member_${server.id}_${foundUser.id}`)
-            : null;
-          const localStat = server?.id
-            ? localStorage.getItem(
-                `membership_status_${server.id}_${foundUser.id}`,
-              )
-            : null;
-
           const isLeft =
             !isDmChannel &&
             server?.id &&
-            (localIsMem === "false" ||
-              localStat === "left" ||
-              localStat === "banned" ||
-              localStat === "kicked" ||
-              (memRecord &&
-                (memRecord.is_member === false ||
-                  memRecord.membership_status === "left" ||
-                  memRecord.membership_status === "banned" ||
-                  memRecord.membership_status === "kicked")));
+            !pbService.isUserInServer(server.id, foundUser);
 
           if (isLeft) {
             parts.push(

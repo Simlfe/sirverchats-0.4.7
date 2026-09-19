@@ -407,9 +407,13 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
       return this.getParticipants();
     }
 
-    if (this.connectionState === 'joining' || this.connectionState === 'connecting') {
-      return this.getParticipants();
-    }
+    // `connectionState` is also updated by adapter events. It can remain in
+    // `joining`/`connecting` after a cancelled browser attempt even though
+    // there is no provider join operation in flight. Treating that stale
+    // state as a successful join returned an empty participant list to the UI
+    // and caused the voice panel to blink back to disconnected. The public
+    // `joinRoom` method already coalesces genuine concurrent joins through
+    // `joinInFlight`, so never use the state flag as a second completion path.
 
     // Resolve the lazy adapter before creating an optimistic participant. A
     // failed module load must be reported as a real call failure, never as a
@@ -532,6 +536,13 @@ export class RealtimeMediaProvider implements IRealtimeMediaProvider {
         throw err instanceof Error ? err : new Error(mediaErr.message);
       }
     }
+
+    // Signaling/ICE is the room join boundary. Do not keep the UI in a
+    // blinking "connecting" state while a browser permission prompt or a
+    // slow microphone driver is settling; capture is a separate publication
+    // and may safely finish after the LiveKit room is usable.
+    this.setConnectionState('connected');
+    this.updateSelfParticipant({ connectionState: 'connected' });
 
     // 2. Auto-start microphone for immediate audio without manual toggle unless explicitly muted
     if (!this.isMuted) {

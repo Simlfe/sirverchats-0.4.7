@@ -109,3 +109,18 @@ test('realtime deduplication: incoming realtime events do not produce duplicates
   const withConfirmed = dedupeMessages([...merged, confirmed]);
   assert.equal(withConfirmed.length, 5);
 });
+
+test('realtime deduplication: expanded sender objects still replace an optimistic echo', () => {
+  const optimistic = {
+    ...createMessage('optimistic-1', 'ch-1', 'hello', '2026-03-01T12:00:04.000Z'),
+    is_pending: true,
+  } as Message;
+  const confirmed = {
+    ...createMessage('real-1', 'ch-1', 'hello', '2026-03-01T12:00:04.100Z'),
+    sender: { id: 'u1', username: 'u1' },
+  } as any as Message;
+
+  const merged = dedupeMessages([optimistic, confirmed]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, 'real-1');
+});

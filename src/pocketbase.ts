@@ -1007,6 +1007,8 @@ class PocketBaseService {
       console.warn('Failed to ban server member:', e);
     }
 
+    await this.syncUserServerMembership(userId, serverId, false);
+
     window.dispatchEvent(new CustomEvent('server-member-updated', {
       detail: { serverId, userId, is_member: false, membership_status: 'banned' }
     }));
@@ -1444,7 +1446,69 @@ class PocketBaseService {
     return null;
   }
 
+  /**
+   * Return membership from the users.in_servers relation only. Server-member
+   * rows and localStorage are profile/role caches, not membership authority.
+   */
+  isUserInServer(serverId: string, userOrId: User | string | null | undefined): boolean {
+    if (!serverId || !userOrId) return false;
+    const user = typeof userOrId === 'string' ? this.getCachedUser(userOrId) : userOrId;
+    if (!user) return false;
+    const relationValues = [
+      ...(Array.isArray(user.in_servers) ? user.in_servers : []),
+      ...(Array.isArray(user.expand?.in_servers) ? user.expand.in_servers.map((server) => server?.id) : []),
+    ];
+    return relationValues.some((value: unknown) => (typeof value === 'string' ? value : (value as any)?.id) === serverId);
+  }
+
   // --- FETCH CHANNELS & SERVERS ---
+
+  /**
+   * `users.in_servers` is the authoritative membership relation. Keep the
+   * auth model and the server-side record in sync whenever a user joins or
+   * leaves so every client reads the same source of truth.
+   */
+  private async syncUserServerMembership(userId: string, serverId: string, joined: boolean): Promise<void> {
+    if (!userId || !serverId || this.isDemo) return;
+
+    try {
+      const userRecord = await this.pb.collection('users').getOne(userId, {
+        fields: 'id,in_servers',
+        requestKey: `membership:user:${userId}`,
+      });
+      const currentIds = Array.isArray(userRecord.in_servers)
+        ? userRecord.in_servers
+            .map((value: unknown) => typeof value === 'string' ? value : (value as any)?.id)
+            .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+        : [];
+      const nextIds = joined
+        ? Array.from(new Set([...currentIds, serverId]))
+        : currentIds.filter((id) => id !== serverId);
+
+      if (nextIds.length !== currentIds.length || nextIds.some((id, index) => id !== currentIds[index])) {
+        await this.pb.collection('users').update(userId, { in_servers: nextIds });
+      }
+
+      // The auth model is used by the startup snapshot before the next
+      // PocketBase read. Update it in place so a join/leave is visible
+      // immediately without waiting for a full re-authentication.
+      const authModel = this.pb.authStore.model as any;
+      if (authModel?.id === userId) {
+        authModel.in_servers = nextIds;
+        if (authModel.expand) {
+          const expanded = Array.isArray(authModel.expand.in_servers)
+            ? authModel.expand.in_servers.filter((server: any) => nextIds.includes(server?.id))
+            : [];
+          authModel.expand.in_servers = expanded;
+        }
+      }
+    } catch (error) {
+      // Membership record changes still succeed if a deployment has a
+      // temporary users-record read/write failure. The next bootstrap will
+      // reconcile the relation; never invent membership from local storage.
+      console.warn('Failed to sync users.in_servers:', error);
+    }
+  }
 
   async fetchServers(): Promise<Server[]> {
     if (this.isDemo) {
@@ -1465,116 +1529,52 @@ class PocketBaseService {
       s.type === 'dm';
 
     try {
-      // 1. FAST-PATH: Query users collection with expanded in_servers relation
-      try {
-        const userRec = await this.withReadDeadline(
-          () => this.pb.collection('users').getOne(currentUserId, {
-            expand: 'in_servers',
-            requestKey: 'bootstrap:servers:user',
-          }),
-          'bootstrap:servers:user',
+      // The users relation is the only membership source used by bootstrap.
+      // Do not infer membership from server_members or silently auto-join a
+      // public server: both produced stale/incorrect server lists.
+      const userRec = await this.withReadDeadline(
+        () => this.pb.collection('users').getOne(currentUserId, {
+          expand: 'in_servers',
+          requestKey: 'bootstrap:servers:user',
+        }),
+        'bootstrap:servers:user',
+      );
+      const expandedServers = Array.isArray(userRec?.expand?.in_servers)
+        ? (userRec.expand.in_servers as Server[])
+        : [];
+      const relationIds = Array.from(new Set([
+        ...(Array.isArray(userRec?.in_servers)
+          ? userRec.in_servers
+              .map((value: unknown) => typeof value === 'string' ? value : (value as any)?.id)
+              .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+          : []),
+        ...expandedServers.map((server) => server?.id).filter((id): id is string => typeof id === 'string' && id.length > 0),
+      ]));
+      const expandedById = new Map(expandedServers.filter((server) => Boolean(server?.id)).map((server) => [server.id, server]));
+
+      // PocketBase may return relation IDs without expansion when the
+      // relation is large. Fetch only those IDs; never scan all servers.
+      const missingIds = relationIds.filter((id) => !expandedById.has(id));
+      if (missingIds.length > 0) {
+        const filter = missingIds.map((id) => `id = "${id.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(' || ');
+        const records = await this.withReadDeadline(
+          () => this.pb.collection('servers').getFullList({ filter, requestKey: 'bootstrap:servers:relation' }),
+          'bootstrap:servers:relation',
         );
-        if (userRec && userRec.expand && Array.isArray(userRec.expand.in_servers) && userRec.expand.in_servers.length > 0) {
-          const directInServers = (userRec.expand.in_servers as Server[]).filter((s) => !isDmServer(s));
-          if (directInServers.length > 0) {
-            directInServers.forEach((s) => {
-              const { cleanText, cooldown } = extractCooldown(s.description);
-              s.description = cleanText;
-              s.cooldown = cooldown || this.getLocalServerCooldown(s.id);
-            });
-            return directInServers;
-          }
-        }
-      } catch (fastErr: any) {
-        if (!isSchemaCompatibilityError(fastErr)) throw fastErr;
-        // The legacy users.in_servers expansion is unavailable; continue to
-        // the indexed server_members query only for this confirmed mismatch.
+        records.forEach((server: any) => expandedById.set(server.id, server as Server));
       }
 
-      let records: any[] = [];
-      try {
-        records = await this.withReadDeadline(
-          () => this.pb.collection('server_members').getFullList({
-            filter: `user = "${currentUserId}"`,
-            expand: 'server',
-            requestKey: 'bootstrap:servers:members',
-          }),
-          'bootstrap:servers:members',
-        );
-      } catch (innerErr: any) {
-        if (!isSchemaCompatibilityError(innerErr)) throw innerErr;
-        // Fallback: fetch directly from 'servers' collection
-        let directServers: any[] = [];
-        try {
-          directServers = await this.withReadDeadline(
-            () => this.pb.collection('servers').getFullList({
-              sort: '-created',
-              requestKey: 'bootstrap:servers:direct',
-            }),
-            'bootstrap:servers:direct',
-          );
-        } catch (sortErr: any) {
-          if (isSchemaCompatibilityError(sortErr)) {
-            directServers = await this.withReadDeadline(
-              () => this.pb.collection('servers').getFullList({
-                requestKey: 'bootstrap:servers:direct:unsorted',
-              }),
-              'bootstrap:servers:direct:unsorted',
-            );
-          } else {
-            throw sortErr;
-          }
-        }
-        const list = directServers as any as Server[];
-        list.forEach((s) => {
-          const { cleanText, cooldown } = extractCooldown(s.description);
-          s.description = cleanText;
-          s.cooldown = cooldown || this.getLocalServerCooldown(s.id);
-        });
-        return list.filter((s) => !isDmServer(s));
-      }
-
-      const servers = records
-        .filter((r) => r.expand && r.expand.server && r.is_member !== false && r.membership_status !== 'left' && r.membership_status !== 'banned')
-        .map((r) => r.expand!.server as any as Server)
-        .filter((s) => !isDmServer(s));
-      
-      // If user has no servers joined on this real instance, join a default one or fetch available servers
-      if (servers.length === 0) {
-        // Fetch all public servers
-        try {
-          const publicServers = await this.withReadDeadline(
-            () => this.pb.collection('servers').getList(1, 10, { requestKey: 'bootstrap:servers:public' }),
-            'bootstrap:servers:public',
-          );
-          const validPublicServers = publicServers.items.filter((s) => !isDmServer(s));
-          if (validPublicServers.length > 0) {
-            // Join first public server
-            const firstServer = validPublicServers[0];
-            try {
-              await this.joinServer(firstServer.id);
-            } catch (joinErr) {
-              // Silently ignore auto-join failures
-            }
-            const list = validPublicServers as any as Server[];
-            list.forEach((s) => {
-              const { cleanText, cooldown } = extractCooldown(s.description);
-              s.description = cleanText;
-              s.cooldown = cooldown || this.getLocalServerCooldown(s.id);
-            });
-            return list;
-          }
-        } catch (e) {
-          // Public servers query fallback silently
-        }
-      }
-      servers.forEach((s) => {
-        const { cleanText, cooldown } = extractCooldown(s.description);
-        s.description = cleanText;
-        s.cooldown = cooldown || this.getLocalServerCooldown(s.id);
+      const servers = relationIds
+        .map((id) => expandedById.get(id))
+        .filter((server): server is Server => Boolean(server) && !isDmServer(server));
+      servers.forEach((server) => {
+        const { cleanText, cooldown } = extractCooldown(server.description);
+        server.description = cleanText;
+        server.cooldown = cooldown || this.getLocalServerCooldown(server.id);
       });
-      return servers.filter((s) => !isDmServer(s));
+      return servers;
     } catch (err: any) {
+      console.warn('Failed to read users.in_servers:', err);
       return [];
     }
   }
@@ -1638,6 +1638,8 @@ class PocketBaseService {
           }
         }
 
+        await this.syncUserServerMembership(currentUserId, serverId, true);
+
         window.dispatchEvent(new CustomEvent('server-member-updated', {
           detail: { serverId, userId: currentUserId, is_member: true, membership_status: 'active' }
         }));
@@ -1696,18 +1698,7 @@ class PocketBaseService {
       detail: { serverId, userId: currentUserId, is_member: true, membership_status: 'active' }
     }));
 
-    // Sync in_servers on user record
-    if (currentUserId) {
-      try {
-        const user = await this.pb.collection('users').getOne(currentUserId);
-        const existingInServers: string[] = Array.isArray(user.in_servers) ? user.in_servers : [];
-        if (!existingInServers.includes(serverId)) {
-          this.pb.collection('users').update(currentUserId, {
-            in_servers: [...existingInServers, serverId]
-          }).catch(() => {});
-        }
-      } catch (e) {}
-    }
+    await this.syncUserServerMembership(currentUserId, serverId, true);
 
     return record as any as ServerMember;
   }
@@ -1757,18 +1748,7 @@ class PocketBaseService {
       console.warn('PocketBase leaveServer update failed, local fallback applied:', err);
     }
 
-    // Remove serverId from user's in_servers
-    if (userId) {
-      try {
-        const user = await this.pb.collection('users').getOne(userId);
-        const existingInServers: string[] = Array.isArray(user.in_servers) ? user.in_servers : [];
-        if (existingInServers.includes(serverId)) {
-          this.pb.collection('users').update(userId, {
-            in_servers: existingInServers.filter((id) => id !== serverId)
-          }).catch(() => {});
-        }
-      } catch (e) {}
-    }
+    await this.syncUserServerMembership(userId, serverId, false);
 
     window.dispatchEvent(new CustomEvent('server-member-updated', {
       detail: { serverId, userId, is_member: false, membership_status: 'left' }
@@ -3822,6 +3802,8 @@ class PocketBaseService {
     } catch (e) {
       console.warn('Failed to update kicked server member:', e);
     }
+
+    await this.syncUserServerMembership(userId, serverId, false);
 
     window.dispatchEvent(new CustomEvent('server-member-updated', {
       detail: { serverId, userId, is_member: false, membership_status: 'kicked' }

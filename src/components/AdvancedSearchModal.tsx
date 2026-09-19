@@ -97,6 +97,7 @@ function buildMemberSuggestions(
     if (member.is_member === false || member.membership_status === 'left' || member.membership_status === 'banned' || member.membership_status === 'kicked') continue;
     const user = member.expand?.user || usersById.get(member.user);
     if (!user?.id || !user.username) continue;
+    if (server?.id && !pbService.isUserInServer(server.id, user)) continue;
     byId.set(user.id, {
       user,
       displayName: member.nickname || member.member_name || user.display_name || user.username,
@@ -106,7 +107,7 @@ function buildMemberSuggestions(
 
   // Keep the signed-in user and owner searchable even when a stale membership
   // cache has not loaded those records yet.
-  if (currentUser?.id && currentUser.username && !byId.has(currentUser.id)) {
+  if (currentUser?.id && currentUser.username && server?.id && pbService.isUserInServer(server.id, currentUser) && !byId.has(currentUser.id)) {
     byId.set(currentUser.id, {
       user: currentUser,
       displayName: currentUser.display_name || currentUser.username,
@@ -115,7 +116,7 @@ function buildMemberSuggestions(
   }
   if (server?.owner && !byId.has(server.owner)) {
     const owner = usersById.get(server.owner);
-    if (owner?.username) {
+    if (owner?.username && pbService.isUserInServer(server.id, owner)) {
       byId.set(owner.id, {
         user: owner,
         displayName: owner.display_name || owner.username,
